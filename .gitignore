@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+# Temporary files
+mergesort
+record_gen
+*.dat
+*.txt
+*.log
