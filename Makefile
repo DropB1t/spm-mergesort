@@ -12,7 +12,7 @@ ifndef FF_ROOT
 FF_ROOT				= ${HOME}/fastflow
 endif
 
-INCLUDES			= -I. -I./include -I $(FF_ROOT)
+INCLUDES			= -I. -I./include -I $(FF_ROOT) -I /opt/openmpi/include/
 LIBS				= -pthread -fopenmp
 
 SOURCES				= $(wildcard *.cpp)
