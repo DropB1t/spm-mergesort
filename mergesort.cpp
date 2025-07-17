@@ -26,13 +26,14 @@ class RecordChunker {
 private:
     char* mmap_data;
     std::vector<RecordTask> record_tasks;
-    std::size_t chunk_size;
-    std::size_t num_threads;
+    size_t num_threads;
+    size_t chunk_size;
+    ExecutionPolicy policy;
 
 public:
     struct WorkRange {
-        std::size_t start_idx;
-        std::size_t end_idx;
+        size_t start_idx;
+        size_t end_idx;
         char* mmap_base;
         const std::vector<RecordTask>* tasks;
         
@@ -40,26 +41,31 @@ public:
             return std::span<RecordTask>(const_cast<RecordTask*>(tasks->data() + start_idx), end_idx - start_idx);
         }
         
-        std::size_t size() const { return end_idx - start_idx; }
+        size_t size() const { return end_idx - start_idx; }
     };
 
-    RecordChunker(char* _mapped_data, std::size_t file_size, std::size_t _chunk_size = MAX_CHUNK_SIZE)
-        : mmap_data(_mapped_data), chunk_size(_chunk_size), num_threads(T)
+    RecordChunker(char* _mapped_data, size_t file_size, size_t _num_threads = T, size_t _chunk_size = MAX_CHUNK_SIZE , ExecutionPolicy _policy = POLICY)
+        : mmap_data(_mapped_data), num_threads(_num_threads), chunk_size(_chunk_size), policy(_policy)
     {
         build_record_index(file_size); // Parse file and build RecordTask index
+
+        if (policy == ExecutionPolicy::OMP || policy == ExecutionPolicy::MPI_OMP) {
+            num_threads = omp_get_max_threads();
+        }
+        
         // Compute dynamic chunk size based on number of threads
         if (num_threads > 1) {
-            chunk_size = std::max(record_tasks.size() / num_threads, static_cast<std::size_t>(1));
+            chunk_size = std::max(record_tasks.size() / num_threads, static_cast<size_t>(1));
         } else {
-            chunk_size =std::max(record_tasks.size()/static_cast<std::size_t>(2), static_cast<std::size_t>(1)); // Fallback to single-threaded size
+            chunk_size =std::max(record_tasks.size()/static_cast<size_t>(2), static_cast<size_t>(1)); // Fallback to single-threaded size
         }
         std::cout << "[INFO] Chunk size set to " << chunk_size << " numbers of records" << std::endl;
         std::cout << "[INFO] Using " << num_threads << " threads for processing" << std::endl;
     }
 
 private:
-    void build_record_index(std::size_t file_size) {
-        std::size_t offset = 0;
+    void build_record_index(size_t file_size) {
+        size_t offset = 0;
         
         while (offset + RECORD_HEADER_SIZE <= file_size) {
             Record* rec = reinterpret_cast<Record*>(mmap_data + offset);
@@ -85,22 +91,22 @@ private:
     }
 
 public:
-    std::size_t record_count() const { return record_tasks.size(); }
+    size_t record_count() const { return record_tasks.size(); }
     
     // Create work ranges for a chunk of RecordTasks
-    std::vector<WorkRange> create_work_ranges(std::size_t chunk_start, std::size_t chunk_end) {
+    std::vector<WorkRange> create_work_ranges(size_t chunk_start, size_t chunk_end) {
         std::vector<WorkRange> ranges;
-        std::size_t chunk_tasks = chunk_end - chunk_start;
-        std::size_t tasks_per_thread = chunk_tasks / num_threads;
+        size_t chunk_tasks = chunk_end - chunk_start;
+        size_t tasks_per_thread = chunk_tasks / num_threads;
         
         if (tasks_per_thread == 0) {
             ranges.push_back({chunk_start, chunk_end, mmap_data, &record_tasks});
             return ranges;
         }
         
-        for (std::size_t i = 0; i < num_threads; ++i) {
-            std::size_t range_start = chunk_start + (i * tasks_per_thread);
-            std::size_t range_end = (i == num_threads - 1) ? 
+        for (size_t i = 0; i < num_threads; ++i) {
+            size_t range_start = chunk_start + (i * tasks_per_thread);
+            size_t range_end = (i == num_threads - 1) ? 
                 chunk_end : chunk_start + ((i + 1) * tasks_per_thread);
             
             ranges.push_back({range_start, range_end, mmap_data, &record_tasks});
@@ -112,8 +118,8 @@ public:
     // Process records chunk by chunk
     template<typename Processor>
     void process_chunked(Processor processor) {
-        for (std::size_t chunk_start = 0; chunk_start < record_tasks.size(); chunk_start += chunk_size) {
-            std::size_t chunk_end = std::min(chunk_start + chunk_size, record_tasks.size());
+        for (size_t chunk_start = 0; chunk_start < record_tasks.size(); chunk_start += chunk_size) {
+            size_t chunk_end = std::min(chunk_start + chunk_size, record_tasks.size());
             
             auto work_ranges = create_work_ranges(chunk_start, chunk_end);
             
@@ -140,32 +146,57 @@ public:
     }
 
     template<typename Compare = std::less<uint64_t>>
-    void par_chunked_sort(Compare comp = Compare{}) {
+    void par_sort(std::vector<WorkRange>& work_ranges, Compare comp = Compare{}) {
+        std::vector<std::future<void>> futures;
+        for (auto& range : work_ranges) {
+            futures.push_back(std::async(std::launch::async, [this, comp, range]() {
+                auto wspan = range.get_task_span();
+                // Sort the work range using stable sort and unsequenced execution policy (vectorized)
+                std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
+                                [comp](const RecordTask& a, const RecordTask& b) {
+                                    return comp(a.key, b.key);
+                                });
+            }));
+        }
+        // Wait for all work ranges in this chunk to complete
+        for (auto& future : futures) future.wait();
+    }
+
+   template<typename Compare = std::less<uint64_t>>
+    void omp_sort(std::vector<WorkRange>& work_ranges, Compare comp = Compare{}) {
+#pragma omp parallel for schedule(static) num_threads(num_threads)
+        for (auto& range : work_ranges) {
+                std::printf("Sorting th: %d\n", omp_get_thread_num());
+                auto wspan = range.get_task_span();
+                // Sort the work range using stable sort and unsequenced execution policy (vectorized)
+                std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
+                                [comp](const RecordTask& a, const RecordTask& b) {
+                                    return comp(a.key, b.key);
+                                });
+        }
+    } 
+    
+    void shm_chunked_sort() {
 
         // Track chunk boundaries for proper merging of chunks ( k_way_merge_chunks )
-        std::vector<std::pair<std::size_t, std::size_t>> chunk_boundaries;
+        std::vector<std::pair<size_t, size_t>> chunk_boundaries;
         
-        for (std::size_t chunk_start = 0; chunk_start < record_tasks.size(); chunk_start += chunk_size) {
-            std::size_t chunk_end = std::min(chunk_start + chunk_size, record_tasks.size());
+        for (size_t chunk_start = 0; chunk_start < record_tasks.size(); chunk_start += chunk_size) {
+            size_t chunk_end = std::min(chunk_start + chunk_size, record_tasks.size());
             chunk_boundaries.emplace_back(chunk_start, chunk_end);
             
             auto work_ranges = create_work_ranges(chunk_start, chunk_end);
             
-            std::vector<std::future<void>> futures;
-            for (auto& range : work_ranges) {
-                futures.push_back(std::async(std::launch::async, [this, comp, range]() {
-                    auto wspan = range.get_task_span();
-                    // Sort the work range using stable sort and unsequenced execution policy (vectorized)
-                    std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
-                             [comp](const RecordTask& a, const RecordTask& b) {
-                                 return comp(a.key, b.key);
-                             });
-                }));
-            }
-            
-            // Wait for all work ranges in this chunk to complete
-            for (auto& future : futures) {
-                future.wait();
+            switch (policy) {
+                case ExecutionPolicy::Parallel:
+                    par_sort(work_ranges);
+                    break;
+                case ExecutionPolicy::OMP:
+                    omp_sort(work_ranges);
+                    break;
+                default:
+                    throw std::runtime_error("The execution policy is set up incorrectly");
+                    break;
             }
             
             merge_work_ranges_in_chunk(chunk_start, chunk_end);
@@ -177,7 +208,7 @@ public:
 private:
 
     // Merge sorted work ranges within a single chunk
-    void merge_work_ranges_in_chunk(std::size_t chunk_start, std::size_t chunk_end) {
+    void merge_work_ranges_in_chunk(size_t chunk_start, size_t chunk_end) {
         if (chunk_end - chunk_start <= 1) return; // Single element or empty
         
         auto work_ranges = create_work_ranges(chunk_start, chunk_end);
@@ -200,7 +231,7 @@ private:
         struct RangeIterator {
             const RecordTask* current;
             const RecordTask* end;
-            //std::size_t range_id;
+            //size_t range_id;
             
             bool is_valid() const { return current < end; }
             
@@ -213,7 +244,7 @@ private:
         
         std::priority_queue<RangeIterator, std::vector<RangeIterator>, std::greater<RangeIterator>> pq;
         
-        for (std::size_t i = 0; i < ranges.size(); ++i) {
+        for (size_t i = 0; i < ranges.size(); ++i) {
             const auto& range = ranges[i];
             if (range.size() > 0) {
                 const RecordTask* start = range.tasks->data() + range.start_idx;
@@ -221,7 +252,7 @@ private:
             }
         }
         
-        std::size_t output_idx = 0;
+        size_t output_idx = 0;
         
         while (!pq.empty() && output_idx < output.size()) {
             auto min_iter = pq.top();
@@ -236,7 +267,7 @@ private:
     }
 
     // K-way merge for chunks
-    void k_way_merge_chunks(const std::vector<std::pair<std::size_t, std::size_t>>& chunk_boundaries) {
+    void k_way_merge_chunks(const std::vector<std::pair<size_t, size_t>>& chunk_boundaries) {
         if (chunk_boundaries.size() <= 1) return;
         
         std::vector<RecordTask> temp(record_tasks.size());
@@ -245,7 +276,7 @@ private:
         struct ChunkIterator {
             const RecordTask* current;
             const RecordTask* end;
-            //std::size_t chunk_id;
+            //size_t chunk_id;
 
             bool is_valid() const { return current < end; }
             
@@ -259,7 +290,7 @@ private:
         std::priority_queue<ChunkIterator, std::vector<ChunkIterator>, std::greater<ChunkIterator>> pq;
         
         // Initialize iterators for each chunk
-        for (std::size_t i = 0; i < chunk_boundaries.size(); ++i) {
+        for (size_t i = 0; i < chunk_boundaries.size(); ++i) {
             const auto& [start, end] = chunk_boundaries[i];
             if (end > start) {
                 const RecordTask* chunk_start = record_tasks.data() + start;
@@ -268,7 +299,7 @@ private:
             }
         }
         
-        std::size_t output_idx = 0;
+        size_t output_idx = 0;
         
         while (!pq.empty() && output_idx < temp.size()) {
             auto min_iter = pq.top();
@@ -314,7 +345,7 @@ public:
 
     // Verify that records are sorted (for debugging)
     bool verify_sorted() const {
-        for (std::size_t i = 1; i < record_tasks.size(); ++i) {
+        for (size_t i = 1; i < record_tasks.size(); ++i) {
             if (record_tasks[i-1].key > record_tasks[i].key) {
                 std::cerr << "Sort verification failed at index " << i 
                          << ": " << record_tasks[i-1].key << " > " << record_tasks[i].key << "\n";
@@ -330,7 +361,7 @@ class MMapFile {
 private:
     int fd;
     char* mapped_data;
-    std::size_t file_size;
+    size_t file_size;
 
 public:
     MMapFile(const char* filename) : fd(-1), mapped_data(nullptr) {
@@ -382,7 +413,7 @@ public:
     }
     
     char* data() { return mapped_data; }
-    std::size_t size() const { return file_size; }
+    size_t size() const { return file_size; }
     
     RecordChunker create_chunker() {
         return RecordChunker(mapped_data, file_size);
@@ -397,7 +428,7 @@ int main() {
         std::cout << "[INFO] Found " << chunker.record_count() << " variable-length records\n";
         
         auto start = std::chrono::high_resolution_clock::now();
-        chunker.par_chunked_sort();
+        chunker.shm_chunked_sort();
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         

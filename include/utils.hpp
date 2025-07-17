@@ -15,14 +15,7 @@
 
 namespace utils {
 
-enum ExecutionPolicy {
-    Sequential = 1,
-    Parallel,
-    FastFlow,
-    OMP,
-    MPI_FF,
-    MPI_OMP
-};
+
 
 // Print a file of records in text format: <key> <len> <payload-hex> ( useful for correctness tests )
 inline void print_records_to_txt(const std::string& bin_filename, const std::string& txt_filename) {

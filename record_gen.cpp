@@ -20,13 +20,13 @@
 
 // Configuration structure
 struct Config {
-    std::size_t record_count = N;
+    size_t record_count = N;
     std::uint32_t payload_max = PAYLOAD_MAX;
     std::filesystem::path output_file = INPUT_FILE;
     std::uint64_t seed = std::chrono::steady_clock::now().time_since_epoch().count();
     
     // Buffer size for efficient large file I/O (32MB buffer)
-    static constexpr std::size_t buffer_size = 32 * 1024 * 1024;
+    static constexpr size_t buffer_size = 32 * 1024 * 1024;
 };
 
 // Command line parsing functions
@@ -82,9 +82,9 @@ namespace cli {
         return config;
     }
 
-    auto make_reporter(std::size_t total) -> std::function<void(std::size_t)> {
-        auto milestone = std::max<std::size_t>(1, total / 100);
-        return [total, milestone](std::size_t current) {
+    auto make_reporter(size_t total) -> std::function<void(size_t)> {
+        auto milestone = std::max<size_t>(1, total / 100);
+        return [total, milestone](size_t current) {
             if (total > 1000 && (current + 1) % milestone == 0) {
                 double percentage = 100.0 * (current + 1) / total;
                 std::cout << std::format("Progress: {}/{} records ({:.1f}%)", current + 1, total, percentage) << std::endl;
@@ -144,10 +144,10 @@ namespace file_io {
     struct BufferedWriter {
         std::ofstream file;
         std::vector<std::uint8_t> buffer;
-        std::size_t buffer_pos = 0;
-        std::size_t total_written = 0;
+        size_t buffer_pos = 0;
+        size_t total_written = 0;
         
-        explicit BufferedWriter(const std::filesystem::path& path, std::size_t buffer_size) 
+        explicit BufferedWriter(const std::filesystem::path& path, size_t buffer_size) 
             : file(path, std::ios::binary | std::ios::out), buffer(buffer_size) {
             if (!file) {
                 throw std::runtime_error(std::format("Cannot open file: {}", path.string()));
@@ -170,12 +170,12 @@ namespace file_io {
         }
         
         void write_bytes(std::span<const std::uint8_t> data) {
-            std::size_t remaining = data.size();
-            std::size_t offset = 0;
+            size_t remaining = data.size();
+            size_t offset = 0;
             
             while (remaining > 0) {
-                std::size_t available = buffer.size() - buffer_pos;
-                std::size_t to_copy = std::min(remaining, available);
+                size_t available = buffer.size() - buffer_pos;
+                size_t to_copy = std::min(remaining, available);
                 
                 std::ranges::copy_n(data.begin() + offset, to_copy, 
                                   buffer.begin() + buffer_pos);
@@ -195,12 +195,12 @@ namespace file_io {
             write_bytes(bytes);
         }
         
-        std::size_t bytes_written() const {
+        size_t bytes_written() const {
             return total_written + buffer_pos;
         }
     };
     
-    auto create_writer(const std::filesystem::path& path, std::size_t buffer_size) 
+    auto create_writer(const std::filesystem::path& path, size_t buffer_size) 
         -> std::unique_ptr<BufferedWriter> {
         return std::make_unique<BufferedWriter>(path, buffer_size);
     }
@@ -224,7 +224,7 @@ namespace pipeline {
         auto writer = file_io::create_writer(config.output_file, Config::buffer_size);
         auto report_progress = cli::make_reporter(config.record_count);
         
-        for (std::size_t index = 0; index < config.record_count; ++index) {
+        for (size_t index = 0; index < config.record_count; ++index) {
             // Generate record
             auto len = len_gen();
             Record *rec = (Record*)malloc(sizeof(Record) + len);
@@ -260,7 +260,7 @@ namespace pipeline {
 
 int main(int argc, char* argv[]) {
     try {
-        auto config = cli::parse_config(std::span{argv, static_cast<std::size_t>(argc)});
+        auto config = cli::parse_config(std::span{argv, static_cast<size_t>(argc)});
         
         if (!config) {
             cli::print_usage(argv[0]);
