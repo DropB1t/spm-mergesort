@@ -36,19 +36,25 @@ public:
         char* mmap_base;
         const std::vector<RecordTask>* tasks;
         
-        std::span<const RecordTask> get_task_span() const {
-            return std::span<const RecordTask>(tasks->data() + start_idx, end_idx - start_idx);
+        std::span<RecordTask> get_task_span() const {
+            return std::span<RecordTask>(const_cast<RecordTask*>(tasks->data() + start_idx), end_idx - start_idx);
         }
         
         std::size_t size() const { return end_idx - start_idx; }
     };
 
-    RecordChunker(char* mapped_data, std::size_t file_size, std::size_t chunk_sz)
-        : mmap_data(mapped_data), chunk_size(chunk_sz),
-          num_threads(T) {
-        
-        // Parse file and build RecordTask index
-        build_record_index(file_size);
+    RecordChunker(char* _mapped_data, std::size_t file_size, std::size_t _chunk_size = MAX_CHUNK_SIZE)
+        : mmap_data(_mapped_data), chunk_size(_chunk_size), num_threads(T)
+    {
+        build_record_index(file_size); // Parse file and build RecordTask index
+        // Compute dynamic chunk size based on number of threads
+        if (num_threads > 1) {
+            chunk_size = std::max(record_tasks.size() / num_threads, static_cast<std::size_t>(1));
+        } else {
+            chunk_size =std::max(record_tasks.size()/static_cast<std::size_t>(2), static_cast<std::size_t>(1)); // Fallback to single-threaded size
+        }
+        std::cout << "[INFO] Chunk size set to " << chunk_size << " numbers of records" << std::endl;
+        std::cout << "[INFO] Using " << num_threads << " threads for processing" << std::endl;
     }
 
 private:
@@ -148,9 +154,9 @@ public:
             std::vector<std::future<void>> futures;
             for (auto& range : work_ranges) {
                 futures.push_back(std::async(std::launch::async, [this, comp, range]() {
-                    
-                    RecordTask* start_ptr = const_cast<RecordTask*>(range.tasks->data() + range.start_idx);
-                    std::sort(std::execution::unseq, start_ptr, start_ptr + range.size(),
+                    auto wspan = range.get_task_span();
+                    // Sort the work range using stable sort and unsequenced execution policy (vectorized)
+                    std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
                              [comp](const RecordTask& a, const RecordTask& b) {
                                  return comp(a.key, b.key);
                              });
@@ -194,14 +200,14 @@ private:
         struct RangeIterator {
             const RecordTask* current;
             const RecordTask* end;
-            std::size_t range_id;
+            //std::size_t range_id;
             
             bool is_valid() const { return current < end; }
             
             bool operator>(const RangeIterator& other) const {
                 if (!is_valid()) return false;
                 if (!other.is_valid()) return true;
-                return std::tie(current->key, range_id, current->foffset) > std::tie(other.current->key, other.range_id, other.current->foffset); // Invert for min-heap
+                return std::tie(current->key, current->foffset) > std::tie(other.current->key, other.current->foffset); // Invert for min-heap
             }
         };
         
@@ -211,7 +217,7 @@ private:
             const auto& range = ranges[i];
             if (range.size() > 0) {
                 const RecordTask* start = range.tasks->data() + range.start_idx;
-                pq.push({start, start + range.size(), i});
+                pq.emplace(start, start + range.size());
             }
         }
         
@@ -222,10 +228,9 @@ private:
             pq.pop();
             
             output[output_idx++] = *min_iter.current;
-            
             ++min_iter.current;
             if (min_iter.is_valid()) {
-                pq.push(min_iter);
+                pq.emplace(min_iter);
             }
         }
     }
@@ -240,14 +245,14 @@ private:
         struct ChunkIterator {
             const RecordTask* current;
             const RecordTask* end;
-            std::size_t chunk_id;
-            
+            //std::size_t chunk_id;
+
             bool is_valid() const { return current < end; }
             
             bool operator>(const ChunkIterator& other) const {
                 if (!is_valid()) return false;
                 if (!other.is_valid()) return true;
-                return std::tie(current->key, chunk_id, current->foffset) > std::tie(other.current->key, other.chunk_id, other.current->foffset); // Invert for min-heap
+                return std::tie(current->key, current->foffset) > std::tie(other.current->key, other.current->foffset); // Invert for min-heap
             }
         };
         
@@ -259,7 +264,7 @@ private:
             if (end > start) {
                 const RecordTask* chunk_start = record_tasks.data() + start;
                 const RecordTask* chunk_end = record_tasks.data() + end;
-                pq.push({chunk_start, chunk_end, i});
+                pq.emplace(chunk_start, chunk_end);
             }
         }
         
@@ -273,7 +278,7 @@ private:
             
             ++min_iter.current;
             if (min_iter.is_valid()) {
-                pq.push(min_iter);
+                pq.emplace(min_iter);
             }
         }
         
@@ -379,8 +384,8 @@ public:
     char* data() { return mapped_data; }
     std::size_t size() const { return file_size; }
     
-    RecordChunker create_chunker(std::size_t chunk_size) {
-        return RecordChunker(mapped_data, file_size, chunk_size);
+    RecordChunker create_chunker() {
+        return RecordChunker(mapped_data, file_size);
     }
 };
 
@@ -388,22 +393,22 @@ int main() {
     try {
         MMapFile file(INPUT_FILE.c_str());
 
-        auto chunker = file.create_chunker(MAX_CHUNK_SIZE);
-        std::cout << "Found " << chunker.record_count() << " variable-length records\n";
+        auto chunker = file.create_chunker();
+        std::cout << "[INFO] Found " << chunker.record_count() << " variable-length records\n";
         
         auto start = std::chrono::high_resolution_clock::now();
         chunker.par_chunked_sort();
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         
-        std::cout << "Sorted records in " << duration.count() << " ms\n";
+        std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
 
 #if defined(DEBUG)
         // Verify sorting
         if (chunker.verify_sorted()) {
-            std::cout << "Sort verification: PASSED\n";
+            std::cout << "[DEBUG] Sort verification: PASSED\n";
         } else {
-            std::cout << "Sort verification: FAILED\n";
+            std::cout << "[DEBUG] Sort verification: FAILED\n";
         }
 #endif
         
@@ -421,7 +426,7 @@ int main() {
             }
             total_payload_bytes += local_bytes;
         });
-        std::cout << "Total payload bytes: " << total_payload_bytes << "\n";
+        std::cout << "[DEBUG] Total payload bytes: " << total_payload_bytes << "\n";
         */
         
     } catch (const std::exception& e) {
