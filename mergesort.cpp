@@ -22,7 +22,7 @@
 #include "record.hpp"
 #include "utils.hpp"
 
-class RecordChunker {
+class RecordProcessor {
 private:
     char* mmap_data;
     std::vector<RecordTask> record_tasks;
@@ -44,12 +44,12 @@ public:
         size_t size() const { return end_idx - start_idx; }
     };
 
-    RecordChunker(char* _mapped_data, size_t file_size, size_t _num_threads = T, size_t _chunk_size = MAX_CHUNK_SIZE , ExecutionPolicy _policy = POLICY)
+    RecordProcessor(char* _mapped_data, size_t file_size, size_t _num_threads = T, size_t _chunk_size = MAX_CHUNK_SIZE , ExecutionPolicy _policy = POLICY)
         : mmap_data(_mapped_data), num_threads(_num_threads), chunk_size(_chunk_size), policy(_policy)
     {
         build_record_index(file_size); // Parse file and build RecordTask index
 
-        if (policy == ExecutionPolicy::OMP || policy == ExecutionPolicy::MPI_OMP) {
+        if (policy == OMP || policy == MPI_OMP) {
             num_threads = omp_get_max_threads();
         }
         
@@ -59,7 +59,10 @@ public:
         } else {
             chunk_size =std::max(record_tasks.size()/static_cast<size_t>(2), static_cast<size_t>(1)); // Fallback to single-threaded size
         }
+
+        std::cout << "[INFO] Found " << this->record_count() << " variable-length records\n";
         std::cout << "[INFO] Chunk size set to " << chunk_size << " numbers of records" << std::endl;
+        std::cout << "[INFO] Using " << ep_to_string(policy) << " policy" << std::endl;
         std::cout << "[INFO] Using " << num_threads << " threads for processing" << std::endl;
     }
 
@@ -166,7 +169,6 @@ public:
     void omp_sort(std::vector<WorkRange>& work_ranges, Compare comp = Compare{}) {
 #pragma omp parallel for schedule(static) num_threads(num_threads)
         for (auto& range : work_ranges) {
-                std::printf("Sorting th: %d\n", omp_get_thread_num());
                 auto wspan = range.get_task_span();
                 // Sort the work range using stable sort and unsequenced execution policy (vectorized)
                 std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
@@ -188,10 +190,10 @@ public:
             auto work_ranges = create_work_ranges(chunk_start, chunk_end);
             
             switch (policy) {
-                case ExecutionPolicy::Parallel:
+                case Parallel:
                     par_sort(work_ranges);
                     break;
-                case ExecutionPolicy::OMP:
+                case OMP:
                     omp_sort(work_ranges);
                     break;
                 default:
@@ -414,21 +416,16 @@ public:
     
     char* data() { return mapped_data; }
     size_t size() const { return file_size; }
-    
-    RecordChunker create_chunker() {
-        return RecordChunker(mapped_data, file_size);
-    }
 };
 
 int main() {
     try {
-        MMapFile file(INPUT_FILE.c_str());
+        MMapFile record_file(INPUT_FILE.c_str());
 
-        auto chunker = file.create_chunker();
-        std::cout << "[INFO] Found " << chunker.record_count() << " variable-length records\n";
+        auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size());
         
         auto start = std::chrono::high_resolution_clock::now();
-        chunker.shm_chunked_sort();
+        rproc->shm_chunked_sort();
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         
@@ -436,7 +433,7 @@ int main() {
 
 #if defined(DEBUG)
         // Verify sorting
-        if (chunker.verify_sorted()) {
+        if (rproc->verify_sorted()) {
             std::cout << "[DEBUG] Sort verification: PASSED\n";
         } else {
             std::cout << "[DEBUG] Sort verification: FAILED\n";
@@ -444,13 +441,15 @@ int main() {
 #endif
         
         // Write sorted file
-        chunker.write_sorted_file(OUTPUT_FILE.c_str());
+#if defined(SAVE_DATA) && SAVE_DATA
+        rproc->write_sorted_file(OUTPUT_FILE.c_str());
         utils::print_records_to_txt(OUTPUT_FILE, "sorted.txt");
+#endif
 
         /*
         // Example: Process payloads
         std::atomic<size_t> total_payload_bytes{0};
-        chunker.process_chunked([&total_payload_bytes](RecordChunker::WorkRange range) {
+        rproc->process_chunked([&total_payload_bytes](RecordProcessor::WorkRange range) {
             size_t local_bytes = 0;
             for (const auto& task : range.get_task_span()) {
                 local_bytes += task.len;
