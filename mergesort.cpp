@@ -48,18 +48,6 @@ public:
         : mmap_data(_mapped_data), num_threads(_num_threads), chunk_size(_chunk_size), policy(_policy)
     {
         build_record_index(file_size); // Parse file and build RecordTask index
-
-        if (policy == OMP || policy == MPI_OMP) {
-            num_threads = omp_get_max_threads();
-        }
-        
-        // Compute dynamic chunk size based on number of threads
-        if (num_threads > 1) {
-            chunk_size = std::max(record_tasks.size() / num_threads, static_cast<size_t>(1));
-        } else {
-            chunk_size =std::max(record_tasks.size()/static_cast<size_t>(2), static_cast<size_t>(1)); // Fallback to single-threaded size
-        }
-
         std::cout << "[INFO] Found " << this->record_count() << " variable-length records\n";
         std::cout << "[INFO] Chunk size set to " << chunk_size << " numbers of records" << std::endl;
         std::cout << "[INFO] Using " << ep_to_string(policy) << " policy" << std::endl;
@@ -139,10 +127,10 @@ public:
         }
     }
 
-    // Sequential sort version
+    // Sequential sort version (sorts whole record_tasks vector)
     template<typename Compare = std::less<uint64_t>>
     void seq_sort(Compare comp = Compare{}) {
-        std::sort(record_tasks.begin(), record_tasks.end(), 
+        std::stable_sort(record_tasks.begin(), record_tasks.end(), 
                  [comp](const RecordTask& a, const RecordTask& b) {
                      return comp(a.key, b.key);
                  });
@@ -176,10 +164,9 @@ public:
                                     return comp(a.key, b.key);
                                 });
         }
-    } 
+    }
     
     void shm_chunked_sort() {
-
         // Track chunk boundaries for proper merging of chunks ( k_way_merge_chunks )
         std::vector<std::pair<size_t, size_t>> chunk_boundaries;
         
@@ -190,6 +177,9 @@ public:
             auto work_ranges = create_work_ranges(chunk_start, chunk_end);
             
             switch (policy) {
+                case Sequential:
+                    seq_sort();
+                    return;
                 case Parallel:
                     par_sort(work_ranges);
                     break;
@@ -200,32 +190,38 @@ public:
                     throw std::runtime_error("The execution policy is set up incorrectly");
                     break;
             }
-            
-            merge_work_ranges_in_chunk(chunk_start, chunk_end);
+            merge_work_ranges_in_chunk(work_ranges, chunk_start, chunk_end);
         }
-        
-        k_way_merge_chunks(chunk_boundaries);
+        switch (policy) {
+            case OMP: {
+                double start = omp_get_wtime();
+                omp_dac_merge_chunks(chunk_boundaries);
+                double elapsed = omp_get_wtime() - start;
+                std::cout << "[TIMES] dac omp chunk merge times " << elapsed*1000.0 << " ms\n";
+                break;
+            }
+            default: {
+                auto start = std::chrono::high_resolution_clock::now();
+                k_way_merge_chunks(chunk_boundaries);
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+                std::cout << "[TIMES] k way chunk merge times " << duration.count() << " ms\n";
+                break;
+            }
+        }
     }
 
 private:
 
     // Merge sorted work ranges within a single chunk
-    void merge_work_ranges_in_chunk(size_t chunk_start, size_t chunk_end) {
-        if (chunk_end - chunk_start <= 1) return; // Single element or empty
-        
-        auto work_ranges = create_work_ranges(chunk_start, chunk_end);
+    inline void merge_work_ranges_in_chunk(std::vector<RecordProcessor::WorkRange> &work_ranges, size_t chunk_start, size_t  chunk_end) {
         if (work_ranges.size() <= 1) return; // Only one work range
-        
         std::vector<RecordTask> temp(chunk_end - chunk_start);
-        
-        // Use k-way merge for work ranges within this chunk
         k_way_merge_ranges(work_ranges, temp);
-        
-        // Copy back to original vector
-        std::copy(temp.begin(), temp.end(), record_tasks.begin() + chunk_start);
+        std::copy(temp.begin(), temp.end(), record_tasks.begin() + chunk_start); // Copy back to original vector
     }
 
-    // K-way merge implementation for work ranges
+    // K-way merge implementation for work ranges within a chunk
     void k_way_merge_ranges(const std::vector<WorkRange>& ranges, std::vector<RecordTask>& output) {
         if (ranges.empty()) return;
 
@@ -259,7 +255,7 @@ private:
         while (!pq.empty() && output_idx < output.size()) {
             auto min_iter = pq.top();
             pq.pop();
-            
+
             output[output_idx++] = *min_iter.current;
             ++min_iter.current;
             if (min_iter.is_valid()) {
@@ -316,6 +312,64 @@ private:
         }
         
         record_tasks = std::move(temp);
+    }
+
+    // Divide and conquer merge for many chunks
+    void omp_dac_merge_chunks(const std::vector<std::pair<size_t, size_t>>& chunk_boundaries) {
+        std::vector<std::pair<size_t, size_t>> current_chunks = chunk_boundaries;
+        std::vector<RecordTask> temp(record_tasks.size());
+        std::vector<RecordTask>* input = &record_tasks;
+        std::vector<RecordTask>* output = &temp;
+        
+        while (current_chunks.size() > 1) {
+            std::vector<std::pair<size_t, size_t>> next_chunks;
+           
+            
+            #pragma omp for schedule(static) nowait
+            for (size_t i = 0; i < current_chunks.size(); i += 2) {
+                if (i + 1 < current_chunks.size()) {
+                    // Merge two adjacent chunks
+                    size_t start1 = current_chunks[i].first;
+                    size_t end1 = current_chunks[i].second;
+                    size_t start2 = current_chunks[i + 1].first;
+                    size_t end2 = current_chunks[i + 1].second;
+                    
+                    size_t merged_start = start1;
+                    size_t merged_size = (end1 - start1) + (end2 - start2);
+                    
+                    std::merge(input->begin() + start1, input->begin() + end1,
+                            input->begin() + start2, input->begin() + end2,
+                            output->begin() + merged_start,
+                            [](const RecordTask& a, const RecordTask& b) {
+                                return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
+                            });
+                    
+                    #pragma omp critical
+                    {
+                        next_chunks.emplace_back(merged_start, merged_start + merged_size);
+                    }
+                } else {
+                    // Odd chunk, copy to output
+                    size_t start = current_chunks[i].first;
+                    size_t end = current_chunks[i].second;
+                    std::copy(input->begin() + start, input->begin() + end,
+                            output->begin() + start);
+                    
+                    #pragma omp critical
+                    {
+                        next_chunks.emplace_back(start, end);
+                    }
+                }
+            }
+            
+            current_chunks = std::move(next_chunks);
+            std::swap(input, output);
+        }
+        
+        // Ensure result is in record_tasks
+        if (input != &record_tasks) {
+            record_tasks = std::move(*input);
+        }
     }
 
 public:
@@ -428,8 +482,8 @@ int main() {
         rproc->shm_chunked_sort();
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        
         std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
+        utils::print_records_to_txt(rproc->get_sorted_tasks(), OUTPUT_FILE);
 
 #if defined(DEBUG)
         // Verify sorting
@@ -438,16 +492,6 @@ int main() {
         } else {
             std::cout << "[DEBUG] Sort verification: FAILED\n";
         }
-#endif
-        
-        // Write sorted file
-#if defined(SAVE_DATA) && SAVE_DATA
-        rproc->write_sorted_file(OUTPUT_FILE.c_str());
-        utils::print_records_to_txt(OUTPUT_FILE, "sorted.txt");
-#endif
-
-        /*
-        // Example: Process payloads
         std::atomic<size_t> total_payload_bytes{0};
         rproc->process_chunked([&total_payload_bytes](RecordProcessor::WorkRange range) {
             size_t local_bytes = 0;
@@ -457,7 +501,7 @@ int main() {
             total_payload_bytes += local_bytes;
         });
         std::cout << "[DEBUG] Total payload bytes: " << total_payload_bytes << "\n";
-        */
+#endif
         
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] " << e.what() << "\n";

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <span>
 
 struct Record {
     uint64_t key;     // 8-byte sorting value

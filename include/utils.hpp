@@ -15,8 +15,6 @@
 
 namespace utils {
 
-
-
 // Print a file of records in text format: <key> <len> <payload-hex> ( useful for correctness tests )
 inline void print_records_to_txt(const std::string& bin_filename, const std::string& txt_filename) {
     std::ifstream in(bin_filename, std::ios::binary);
@@ -50,55 +48,21 @@ inline void print_records_to_txt(const std::string& bin_filename, const std::str
         in.seekg(cur.len, std::ios::cur); // Skip the payload
     }
 
-    /* 
-    char header_buf[RECORD_HEADER_SIZE];
-    while (true) {
-        if(in.peek() == EOF) {
-            std::cout << "End of file reached\n";
-            break;
-        }
-
-        in.read(header_buf, PAYLOAD_OFFSET);
-        const Record* tmp = reinterpret_cast<const Record*>(header_buf);
-        if (tmp->len == 0) {
-            std::cerr << "Header length is zero, stopping\n";
-            break;
-        }
-
-        Record *rec = (Record*)malloc(sizeof(Record) + tmp->len);
-        if (!rec) {
-            std::cerr << "Memory allocation failed\n";
-            break;
-        }
-
-        *rec = *tmp;
-        auto read_size = rec->len + RECORD_PAD_SIZE;
-        in.read(reinterpret_cast<char*>(rec->payload), read_size);
-        if (in.gcount() != static_cast<std::streamsize>(read_size)) {
-            std::cerr << "Failed to read payload of length " << rec->len << "\n";
-            break;
-        }
-
-        std::cout << "Read record: key=" << rec->key << ", len=" << rec->len << "\n";
-        std::cout << "Payload (hex): ";
-        for (size_t i = 0; i < rec->len; ++i) {
-            std::cout << std::format("{:02x}", rec->payload[i]);
-        }
-        std::cout << "\n";
-
-        // Print key, len, payload as hex
-        out << rec->key << " " << rec->len << " ";
-        for (size_t i = 0; i < rec->len; ++i) {
-            out << std::format("{:02x}", rec->payload[i]);
-        }
-        out << "\n";
-        free(rec);
-    } 
-    */
-
     std::cout << "Wrote " << txt_filename << " for inspection." << std::endl;
     in.close();
     out.close();
+}
+
+inline void print_records_to_txt(const std::vector<RecordTask>& tasks, const std::string& txt_filename) {
+    std::ofstream out(txt_filename);
+    if (!out) throw std::runtime_error("Cannot open output file: " + txt_filename);
+
+    for (const auto& task : tasks) {
+        out << task.key << " " << task.len << "\n";
+    }
+
+    out.close();
+    std::cout << "Wrote " << txt_filename << " for inspection." << std::endl;
 }
 
 } // namespace utils

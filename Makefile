@@ -6,7 +6,7 @@ CXXFLAGS			= -O0 -g -DDEBUG
 else
 CXXFLAGS         	= -O3 -march=native -ffast-math -mavx2 -DNDEBUG 
 endif
-CXXFLAGS			+= -Wall -DSAVE_DATA=0
+CXXFLAGS			+= -Wall # -DBLOCKING_MODE -DFF_BOUNDED_BUFFER -DNO_DEFAULT_MAPPING
 
 ifndef FF_ROOT 
 FF_ROOT				= ${HOME}/fastflow
@@ -22,7 +22,7 @@ all:
 	$(MAKE) $(TARGET)
 
 mergesort: mergesort.cpp include/defines.hpp include/record.hpp include/utils.hpp
-	@$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o mergesort $(LIBS)
+	$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o mergesort $(LIBS)
 
 record_gen: record_gen.cpp include/defines.hpp include/record.hpp include/utils.hpp
 	@$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o record_gen $(LIBS)
