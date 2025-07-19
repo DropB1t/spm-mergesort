@@ -18,9 +18,258 @@
 #include <mpi.h>
 #include <omp.h>
 
+#include <ff/ff.hpp>
+#include <ff/pipeline.hpp>
+using namespace ff;
+
 #include "defines.hpp"
 #include "record.hpp"
 #include "utils.hpp"
+
+class RecordTaskSplitter : public ff_node_t<WorkRange> {
+private:
+    std::vector<WorkRange> *work_ranges;
+
+public:
+    RecordTaskSplitter(std::vector<WorkRange> *ranges) 
+        : work_ranges(ranges) {}
+
+    WorkRange* svc(WorkRange* task) override {
+        for (auto& range : *work_ranges) {
+            this->ff_send_out(&range);
+        }
+        return EOS;
+    }
+};
+
+class RecordSortWorker : public ff::ff_node_t<WorkRange> {
+private:
+    ssize_t worker_id;
+
+public:
+    RecordSortWorker() : worker_id(-1) {}
+    
+    int svc_init() override {
+        worker_id = this->get_my_id();
+        return 0;
+    }
+
+    WorkRange* svc(WorkRange* task) override {
+        // Sort the work range
+        auto work_span = task->get_task_span();
+        std::sort(std::execution::unseq, work_span.begin(), work_span.end(),
+                  [](const RecordTask& a, const RecordTask& b) {
+                      return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
+                  });
+
+        task->ff_id = worker_id;
+        return task;
+    }
+};
+
+class RecordTaskMerger : public ff::ff_node_t<WorkRange> {
+private:
+    int level;
+    size_t merger_id;
+    WorkRange* last_task = nullptr;
+    bool is_last_level;
+    std::vector<RecordTask>* record_tasks;
+    //std::vector<RecordTask> final_merged_data;
+    
+public:
+    RecordTaskMerger(int l, bool is_last = false, std::vector<RecordTask>* tasks = nullptr) 
+        : level(l), is_last_level(is_last), record_tasks(tasks) {}
+    
+    int svc_init() override {
+        merger_id = this->get_my_id();
+        return 0;
+    }
+    
+    WorkRange* svc(WorkRange* task) override {
+        if (last_task == nullptr) {
+            last_task = task;
+            return GO_ON; // Wait for pair
+        } else {
+            // Merge two tasks
+            auto merged_task = merge_work_ranges(last_task, task);
+            
+            // Clean up consumed tasks
+            //delete last_task;
+            //delete task;
+            last_task = nullptr;
+
+            if (is_last_level) {
+                last_task = merged_task; // Keep the last merged task for final output
+                return GO_ON;
+            }
+            
+            return merged_task; // Pass to next level
+        }
+    }
+
+    void eosnotify(ssize_t id) override {
+        if (!is_last_level && last_task) {
+            // Forward unpaired task to next level
+            this->ff_send_out(last_task);
+        }
+    }
+    
+    /* void svc_end() override {
+        if (is_last_level && last_task) {
+            auto merged_range = last_task->tasks;
+            std::copy(merged_range->begin(), merged_range->end(), record_tasks->data() + last_task->start_idx);
+        }
+    } */
+
+private:
+    WorkRange* merge_work_ranges(WorkRange* task1, WorkRange* task2) {
+        auto span1 = task1->get_task_span();
+        auto span2 = task2->get_task_span();
+
+        // Create new storage for merged data
+        size_t total_size = span1.size() + span2.size();
+        std::vector<RecordTask> tmp(total_size);
+
+        utils::k_way_merge_ranges(span1, span2, tmp);
+
+        /* std::merge(span1.begin(), span1.end(),
+                   span2.begin(), span2.end(),
+                   tmp.begin(),
+                   [](const RecordTask& a, const RecordTask& b) {
+                       return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
+                   }); */
+
+        auto start_idx = std::min(task1->start_idx, task2->start_idx);
+        auto end_idx = std::max(task1->end_idx, task2->end_idx);
+        std::copy(tmp.begin(), tmp.end(), record_tasks->data() + start_idx);
+
+        // Create new WorkRange pointing to merged data
+        auto merged_range = new WorkRange{
+            start_idx,
+            end_idx,
+            record_tasks,
+            merger_id
+        };
+        
+        return merged_range;
+    }
+};
+
+class RecordCollector : public ff::ff_monode_t<WorkRange> {
+private:
+    int level;
+    int next_merge_size;
+    
+public:
+    RecordCollector(int l) : level(l), next_merge_size(0) {}
+
+    int svc_init() override {
+        next_merge_size = this->get_num_outchannels();
+        return 0;
+    }
+
+    WorkRange* svc(WorkRange* task) override {
+        if (!task) return task;
+        
+        // Route tasks to mergers based on ff_id
+        int target_merger = (task->ff_id >= 0) ? (task->ff_id / 2) : 0;
+        if (target_merger >= next_merge_size) {
+            target_merger = next_merge_size - 1;
+        }
+        
+        this->ff_send_out_to(task, target_merger);
+        return GO_ON;
+    }
+};
+
+class RecordSortingPipeline {
+private:
+    std::unique_ptr<ff_pipeline> pipeline;
+    std::vector<WorkRange> *work_ranges_storage; // Own the work ranges
+
+public:
+    RecordSortingPipeline(std::vector<WorkRange> *work_ranges, 
+                          int num_workers, 
+                          char* mmap_data, 
+                          std::vector<RecordTask>* record_tasks)
+    {
+        pipeline = std::make_unique<ff_pipeline>();
+        work_ranges_storage = work_ranges;
+
+        // Stage 1: Sorting farm
+        auto sorting_farm = build_sorting_farm(num_workers);
+        pipeline->add_stage(sorting_farm);
+
+        // Stage 2: Merging stages (binary tree)
+        auto merger_levels = calculate_merger_levels(num_workers);
+
+        for (size_t i = 0; i < merger_levels.size() - 1; i++) {
+            int level = i + 1;
+            int num_mergers = merger_levels[i];
+            auto merger_farm = build_merger_farm(level, num_mergers, record_tasks);
+            pipeline->add_stage(merger_farm);
+        }
+        
+        pipeline->add_stage(build_last_merger(merger_levels.back(), record_tasks));
+    }
+    
+    int run_and_wait_end() {
+        return pipeline->run_and_wait_end();;
+    }
+    
+private:
+    std::vector<int> calculate_merger_levels(int num_workers) {
+        std::vector<int> levels;
+        int current_level_size = num_workers;
+        int level = 1;
+        
+        while (current_level_size > 1) {
+            int next_level_size = (current_level_size + 1) / 2;
+            levels.push_back(next_level_size);
+            /* std::cout << "[INFO] Level " << level << ": " << next_level_size 
+                      << " mergers (reducing from " << current_level_size << ")" << std::endl; */
+            current_level_size = next_level_size;
+            level++;
+        }
+        
+        return levels;
+    }
+
+    ff::ff_farm build_sorting_farm(int num_workers) {
+        auto splitter = new RecordTaskSplitter(work_ranges_storage);
+
+        std::vector<ff::ff_node*> workers;
+        for (int i = 0; i < num_workers; i++) {
+            workers.push_back(new RecordSortWorker());
+        }
+
+        auto farm = ff::ff_farm(workers);
+        farm.add_emitter(splitter);
+        farm.remove_collector();
+        return farm;
+    }
+
+    ff::ff_farm build_merger_farm(int level, int num_mergers, std::vector<RecordTask>* record_tasks) {
+        auto collector = new RecordCollector(level);
+        std::vector<ff::ff_node*> mergers;
+        
+        for (int i = 0; i < num_mergers; i++) {
+            mergers.push_back(new RecordTaskMerger(level, false, record_tasks));
+        }
+
+        auto farm = ff::ff_farm(mergers);
+        farm.add_emitter(collector);
+        farm.remove_collector(); // No collector needed
+        return farm;
+    }
+
+    ff::ff_farm build_last_merger(int level, std::vector<RecordTask>* record_tasks) {
+        std::vector<ff::ff_node*> mergers;
+        mergers.push_back(new RecordTaskMerger(level, true, record_tasks));
+        auto farm = ff::ff_farm(mergers);
+        return farm;
+    }
+};
 
 class RecordProcessor {
 private:
@@ -31,18 +280,6 @@ private:
     ExecutionPolicy policy;
 
 public:
-    struct WorkRange {
-        size_t start_idx;
-        size_t end_idx;
-        char* mmap_base;
-        const std::vector<RecordTask>* tasks;
-        
-        std::span<RecordTask> get_task_span() const {
-            return std::span<RecordTask>(const_cast<RecordTask*>(tasks->data() + start_idx), end_idx - start_idx);
-        }
-        
-        size_t size() const { return end_idx - start_idx; }
-    };
 
     RecordProcessor(char* _mapped_data, size_t file_size, size_t _num_threads = T, size_t _chunk_size = MAX_CHUNK_SIZE , ExecutionPolicy _policy = POLICY)
         : mmap_data(_mapped_data), num_threads(_num_threads), chunk_size(_chunk_size), policy(_policy)
@@ -91,7 +328,7 @@ public:
         size_t tasks_per_thread = chunk_tasks / num_threads;
         
         if (tasks_per_thread == 0) {
-            ranges.push_back({chunk_start, chunk_end, mmap_data, &record_tasks});
+            ranges.push_back({chunk_start, chunk_end, &record_tasks});
             return ranges;
         }
         
@@ -100,7 +337,7 @@ public:
             size_t range_end = (i == num_threads - 1) ? 
                 chunk_end : chunk_start + ((i + 1) * tasks_per_thread);
             
-            ranges.push_back({range_start, range_end, mmap_data, &record_tasks});
+            ranges.push_back({range_start, range_end, &record_tasks});
         }
         
         return ranges;
@@ -136,32 +373,28 @@ public:
                  });
     }
 
-    template<typename Compare = std::less<uint64_t>>
-    void par_sort(std::vector<WorkRange>& work_ranges, Compare comp = Compare{}) {
+    void par_sort(std::vector<WorkRange>& work_ranges) {
         std::vector<std::future<void>> futures;
         for (auto& range : work_ranges) {
-            futures.push_back(std::async(std::launch::async, [this, comp, range]() {
+            futures.push_back(std::async(std::launch::async, [this, range]() {
                 auto wspan = range.get_task_span();
-                // Sort the work range using stable sort and unsequenced execution policy (vectorized)
-                std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
-                                [comp](const RecordTask& a, const RecordTask& b) {
-                                    return comp(a.key, b.key);
+                // Sort the work range using execution policy (vectorized)
+                std::sort(std::execution::unseq, wspan.begin(), wspan.end(),
+                                [](const RecordTask& a, const RecordTask& b) {
+                                    return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
                                 });
             }));
         }
-        // Wait for all work ranges in this chunk to complete
         for (auto& future : futures) future.wait();
     }
 
-   template<typename Compare = std::less<uint64_t>>
-    void omp_sort(std::vector<WorkRange>& work_ranges, Compare comp = Compare{}) {
+    void omp_sort(std::vector<WorkRange>& work_ranges) {
 #pragma omp parallel for schedule(static) num_threads(num_threads)
         for (auto& range : work_ranges) {
                 auto wspan = range.get_task_span();
-                // Sort the work range using stable sort and unsequenced execution policy (vectorized)
-                std::stable_sort(std::execution::unseq, wspan.begin(), wspan.end(),
-                                [comp](const RecordTask& a, const RecordTask& b) {
-                                    return comp(a.key, b.key);
+                std::sort(std::execution::unseq, wspan.begin(), wspan.end(),
+                                [](const RecordTask& a, const RecordTask& b) {
+                                    return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
                                 });
         }
     }
@@ -211,10 +444,28 @@ public:
         }
     }
 
+    // FastFlow-based chunked sort
+    void ff_chunked_sort() {
+        std::vector<std::pair<size_t, size_t>> chunk_boundaries;
+        // Print record task size
+        for (size_t chunk_start = 0; chunk_start < record_tasks.size(); chunk_start += chunk_size) {
+            size_t chunk_end = std::min(chunk_start + chunk_size, record_tasks.size());
+            chunk_boundaries.emplace_back(chunk_start, chunk_end);
+            
+            auto work_ranges = create_work_ranges(chunk_start, chunk_end);
+            RecordSortingPipeline pipeline(&work_ranges, num_threads, mmap_data, &record_tasks);
+            
+            if (pipeline.run_and_wait_end() < 0) {
+                throw std::runtime_error("FastFlow pipeline execution failed!");
+            }
+        }
+        k_way_merge_chunks(chunk_boundaries);
+    }
+
 private:
 
     // Merge sorted work ranges within a single chunk
-    inline void merge_work_ranges_in_chunk(std::vector<RecordProcessor::WorkRange> &work_ranges, size_t chunk_start, size_t  chunk_end) {
+    inline void merge_work_ranges_in_chunk(std::vector<WorkRange> &work_ranges, size_t chunk_start, size_t  chunk_end) {
         if (work_ranges.size() <= 1) return; // Only one work range
         std::vector<RecordTask> temp(chunk_end - chunk_start);
         k_way_merge_ranges(work_ranges, temp);
@@ -479,7 +730,11 @@ int main() {
         auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size());
         
         auto start = std::chrono::high_resolution_clock::now();
-        rproc->shm_chunked_sort();
+        if (POLICY == FastFlow) {
+            rproc->ff_chunked_sort();
+        } else {
+            rproc->shm_chunked_sort();
+        }
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
@@ -493,7 +748,7 @@ int main() {
             std::cout << "[DEBUG] Sort verification: FAILED\n";
         }
         std::atomic<size_t> total_payload_bytes{0};
-        rproc->process_chunked([&total_payload_bytes](RecordProcessor::WorkRange range) {
+        rproc->process_chunked([&total_payload_bytes](WorkRange range) {
             size_t local_bytes = 0;
             for (const auto& task : range.get_task_span()) {
                 local_bytes += task.len;

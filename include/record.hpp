@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 #include <span>
 
 struct Record {
@@ -36,6 +37,19 @@ struct RecordTask {
         Record* rec = get_record(mmap_base);
         return std::span<char>(rec->payload, len);
     }
+};
+
+struct WorkRange {
+    size_t start_idx;
+    size_t end_idx;
+    const std::vector<RecordTask>* tasks;
+    size_t ff_id = -1; // FastFlow worker ID
+    
+    std::span<RecordTask> get_task_span() const {
+        return std::span<RecordTask>(const_cast<RecordTask*>(tasks->data() + start_idx), end_idx - start_idx);
+    }
+    
+    size_t size() const { return end_idx - start_idx; }
 };
 
 #endif // RECORD_HPP

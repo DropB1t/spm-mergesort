@@ -26,7 +26,7 @@ constexpr std::string_view ep_to_string(ExecutionPolicy c) {
 
 /* RECORD PARAMETERS */
 constexpr std::string INPUT_FILE = "records.dat";
-constexpr std::string OUTPUT_FILE = "sorted.dat";
+constexpr std::string OUTPUT_FILE = "sorted.txt";
 
 constexpr size_t N = 1000; // Number of records
 constexpr int PAYLOAD_MAX = 1024; // Maximum payload size in bytes

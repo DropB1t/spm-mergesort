@@ -25,7 +25,7 @@ mergesort: mergesort.cpp include/defines.hpp include/record.hpp include/utils.hp
 	$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o mergesort $(LIBS)
 
 record_gen: record_gen.cpp include/defines.hpp include/record.hpp include/utils.hpp
-	@$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o record_gen $(LIBS)
+	$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o record_gen $(LIBS)
 
 clean:
 	-rm -fr $(TARGET) *.o *~ *.d
