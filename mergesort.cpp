@@ -67,6 +67,36 @@ public:
     }
 };
 
+void k_way_merge_ranges(std::span<RecordTask>& span1, std::span<RecordTask>& span2, std::vector<RecordTask> &output) {
+    struct RangeIterator {
+        const RecordTask* current;
+        const RecordTask* end;
+        
+        bool is_valid() const { return current < end; }
+        
+        bool operator>(const RangeIterator& other) const {
+            if (!is_valid()) return false;
+            if (!other.is_valid()) return true;
+            return std::tie(current->key, current->foffset) > std::tie(other.current->key, other.current->foffset); // Invert for min-heap
+        }
+    };
+
+    std::priority_queue<RangeIterator, std::vector<RangeIterator>, std::greater<RangeIterator>> pq;
+    pq.emplace(span1.data(), span1.data() + span1.size());
+    pq.emplace(span2.data(), span2.data() + span2.size());
+
+    size_t output_idx = 0;
+    while (!pq.empty() && output_idx < output.size()) {
+        auto min_iter = pq.top();
+        pq.pop();
+        output[output_idx++] = *min_iter.current;
+        ++min_iter.current;
+        if (min_iter.is_valid()) {
+            pq.emplace(min_iter);
+        }
+    }
+}
+
 class RecordTaskMerger : public ff::ff_node_t<WorkRange> {
 private:
     int level;
@@ -74,7 +104,6 @@ private:
     WorkRange* last_task = nullptr;
     bool is_last_level;
     std::vector<RecordTask>* record_tasks;
-    //std::vector<RecordTask> final_merged_data;
     
 public:
     RecordTaskMerger(int l, bool is_last = false, std::vector<RecordTask>* tasks = nullptr) 
@@ -113,13 +142,6 @@ public:
             this->ff_send_out(last_task);
         }
     }
-    
-    /* void svc_end() override {
-        if (is_last_level && last_task) {
-            auto merged_range = last_task->tasks;
-            std::copy(merged_range->begin(), merged_range->end(), record_tasks->data() + last_task->start_idx);
-        }
-    } */
 
 private:
     WorkRange* merge_work_ranges(WorkRange* task1, WorkRange* task2) {
@@ -130,7 +152,7 @@ private:
         size_t total_size = span1.size() + span2.size();
         std::vector<RecordTask> tmp(total_size);
 
-        utils::k_way_merge_ranges(span1, span2, tmp);
+        k_way_merge_ranges(span1, span2, tmp);
 
         /* std::merge(span1.begin(), span1.end(),
                    span2.begin(), span2.end(),
@@ -281,7 +303,7 @@ private:
 
 public:
 
-    RecordProcessor(char* _mapped_data, size_t file_size, size_t _num_threads = T, size_t _chunk_size = MAX_CHUNK_SIZE , ExecutionPolicy _policy = POLICY)
+    RecordProcessor(char* _mapped_data, size_t file_size, size_t _num_threads = g_th_workers, size_t _chunk_size = max_chunk_size , ExecutionPolicy _policy = g_policy)
         : mmap_data(_mapped_data), num_threads(_num_threads), chunk_size(_chunk_size), policy(_policy)
     {
         build_record_index(file_size); // Parse file and build RecordTask index
@@ -730,7 +752,7 @@ int main() {
         auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size());
         
         auto start = std::chrono::high_resolution_clock::now();
-        if (POLICY == FastFlow) {
+        if (g_policy == FastFlow) {
             rproc->ff_chunked_sort();
         } else {
             rproc->shm_chunked_sort();

@@ -67,36 +67,6 @@ inline void print_records_to_txt(const std::vector<RecordTask>& tasks, const std
     std::cout << "Wrote " << txt_filename << " for inspection." << std::endl;
 }
 
-void k_way_merge_ranges(std::span<RecordTask>& span1, std::span<RecordTask>& span2, std::vector<RecordTask> &output) {
-    struct RangeIterator {
-        const RecordTask* current;
-        const RecordTask* end;
-        
-        bool is_valid() const { return current < end; }
-        
-        bool operator>(const RangeIterator& other) const {
-            if (!is_valid()) return false;
-            if (!other.is_valid()) return true;
-            return std::tie(current->key, current->foffset) > std::tie(other.current->key, other.current->foffset); // Invert for min-heap
-        }
-    };
-
-    std::priority_queue<RangeIterator, std::vector<RangeIterator>, std::greater<RangeIterator>> pq;
-    pq.emplace(span1.data(), span1.data() + span1.size());
-    pq.emplace(span2.data(), span2.data() + span2.size());
-
-    size_t output_idx = 0;
-    while (!pq.empty() && output_idx < output.size()) {
-        auto min_iter = pq.top();
-        pq.pop();
-        output[output_idx++] = *min_iter.current;
-        ++min_iter.current;
-        if (min_iter.is_valid()) {
-            pq.emplace(min_iter);
-        }
-    }
-}
-
 } // namespace utils
 
 #endif // UTILS_HPP

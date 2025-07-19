@@ -28,13 +28,14 @@ constexpr std::string_view ep_to_string(ExecutionPolicy c) {
 constexpr std::string INPUT_FILE = "records.dat";
 constexpr std::string OUTPUT_FILE = "sorted.txt";
 
-constexpr size_t N = 1000; // Number of records
-constexpr int PAYLOAD_MAX = 1024; // Maximum payload size in bytes
-constexpr int PAYLOAD_MIN = 8; // Minimum payload size in bytes
+size_t g_num_records = 1000; // Number of records
+int PAYLOAD_MAX = 1024; // Maximum payload size in bytes
+int PAYLOAD_MIN = 8; // Minimum payload size in bytes
 
 /* EXECUTION PARAMETERS */
-constexpr ExecutionPolicy POLICY = OMP;
-constexpr size_t T = 4; // Number of threads for parallel processing
-constexpr size_t MAX_CHUNK_SIZE = 500000; // Maximum chunk size of records
+ExecutionPolicy g_policy = FastFlow;
+size_t g_th_workers = 4; // Number of threads for parallel processing
+
+size_t max_chunk_size = 10000; // Maximum chunk size of records
 
 #endif

@@ -20,13 +20,13 @@
 
 // Configuration structure
 struct Config {
-    size_t record_count = N;
-    std::uint32_t payload_max = PAYLOAD_MAX;
-    std::filesystem::path output_file = INPUT_FILE;
     std::uint64_t seed = std::chrono::steady_clock::now().time_since_epoch().count();
-    
-    // Buffer size for efficient large file I/O (32MB buffer)
-    static constexpr size_t buffer_size = 32 * 1024 * 1024;
+    std::filesystem::path output_file = INPUT_FILE;
+    std::uint32_t payload_max = PAYLOAD_MAX;
+    size_t record_count = g_num_records;
+
+    // Buffer size for efficient large file I/O (512MB buffer)
+    static constexpr size_t buffer_size = 512 * 1024 * 1024;
 };
 
 // Command line parsing functions
@@ -93,9 +93,9 @@ namespace cli {
     }
     
     void print_usage(std::string_view program_name) {
-        std::cout << std::format("Usage: {} <N> [PAYLOAD_MAX] [output_file]", program_name) << std::endl;
-        std::cout << "  N            - Number of records to generate" << std::endl;
-        std::cout << "  PAYLOAD_MAX  - Maximum payload size (default: 1024, min: 8)" << std::endl;
+        std::cout << std::format("Usage: {} <num_records> [payload_max] [output_file]", program_name) << std::endl;
+        std::cout << "  num_records  - Number of records to generate" << std::endl;
+        std::cout << "  payload_max  - Maximum payload size (default: 1024, min: 8)" << std::endl;
         std::cout << "  output_file  - Output filename (default: records.dat)" << std::endl;
         std::cout << "  seed         - Random seed (default: current time)" << std::endl;
         std::cout << std::endl;

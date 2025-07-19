@@ -1,6 +1,6 @@
 # Makefile for SPM Mergesort
 
-CXX					= g++ -std=c++20
+CXX					= mpicxx -std=c++20
 ifdef DEBUG
 CXXFLAGS			= -O0 -g -DDEBUG
 else
