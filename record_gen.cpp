@@ -5,7 +5,6 @@
 #include <string>
 #include <chrono>
 #include <span>
-#include <format>
 #include <ranges>
 #include <algorithm>
 #include <cstdint>
@@ -87,13 +86,15 @@ namespace cli {
         return [total, milestone](size_t current) {
             if (total > 1000 && (current + 1) % milestone == 0) {
                 double percentage = 100.0 * (current + 1) / total;
-                std::cout << std::format("Progress: {}/{} records ({:.1f}%)", current + 1, total, percentage) << std::endl;
+                std::ostringstream oss;
+                oss << "Progress: " << (current + 1) << "/" << total << " records (" << std::fixed << std::setprecision(1) << percentage << "%)";
+                std::cout << oss.str() << std::endl;
             }
         };
     }
     
     void print_usage(std::string_view program_name) {
-        std::cout << std::format("Usage: {} <num_records> [payload_max] [output_file]", program_name) << std::endl;
+        std::cout << "Usage: " << program_name << " <num_records> [payload_max] [output_file]" << std::endl;
         std::cout << "  num_records  - Number of records to generate" << std::endl;
         std::cout << "  payload_max  - Maximum payload size (default: 1024, min: 8)" << std::endl;
         std::cout << "  output_file  - Output filename (default: records.dat)" << std::endl;
@@ -150,7 +151,9 @@ namespace file_io {
         explicit BufferedWriter(const std::filesystem::path& path, size_t buffer_size) 
             : file(path, std::ios::binary | std::ios::out), buffer(buffer_size) {
             if (!file) {
-                throw std::runtime_error(std::format("Cannot open file: {}", path.string()));
+                std::ostringstream oss;
+                oss << "Cannot open file: " << path.string();
+                throw std::runtime_error(oss.str());
             }
         }
         
@@ -210,9 +213,8 @@ namespace file_io {
 namespace pipeline {
     
     void generate_records(const Config& config) {
-        std::cout << std::format("Generating {} records with payload sizes 8-{} bytes", 
-                    config.record_count, config.payload_max) << std::endl;
-        std::cout << std::format("Output file: {}", config.output_file.string()) << std::endl;
+        std::cout << "Generating " << config.record_count << " records with payload sizes 8-" << config.payload_max << " bytes" << std::endl;
+        std::cout << "Output file: " << config.output_file.string() << std::endl;
  
         // Create functional generators
         auto gen = rng::make_generator(config.seed);
@@ -236,13 +238,16 @@ namespace pipeline {
 
 #if defined(DEBUG)
             // Print debug info
+            std::ostringstream oss;
             std::string hex_payload;
             hex_payload.reserve(rec->len * 2);
             for (auto byte : payload_vec) {
-                hex_payload += std::format("{:02x}", byte);
+                char buf[3];
+                std::snprintf(buf, sizeof(buf), "%02x", byte);
+                hex_payload += buf;
             }
-            std::cout << std::format("Generating record {}: key={}, len={}\n payload: {}",
-                        index + 1, rec->key, rec->len, hex_payload) << std::endl;
+            oss << "Generating record " << (index + 1) << ": key=" << rec->key << ", len=" << rec->len << "\n payload: " << hex_payload;
+            std::cout << oss.str() << std::endl;
 #endif
 
             writer->write_bytes(std::span<const std::uint8_t>(
@@ -252,9 +257,8 @@ namespace pipeline {
         }
 
         auto final_size = writer->bytes_written();
-        std::cout << std::format("Successfully generated {} records", config.record_count) << std::endl;
-        std::cout << std::format("Actual file size: {} bytes ({:.2f} GB)", 
-                    final_size, final_size / (1024.0 * 1024.0 * 1024.0)) << std::endl;
+        std::cout << "Successfully generated " << config.record_count << " records" << std::endl;
+        std::cout << "Actual file size: " << final_size << " bytes (" << std::fixed << std::setprecision(2) << (final_size / (1024.0 * 1024.0 * 1024.0)) << " GB)" << std::endl;
     }
 }
 
@@ -271,7 +275,7 @@ int main(int argc, char* argv[]) {
         utils::print_records_to_txt(config->output_file.string(), "generated.txt");
 
     } catch (const std::exception& e) {
-        std::cerr << std::format("Error: {}", e.what()) << std::endl;
+        std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
     return 0;
