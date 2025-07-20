@@ -4,7 +4,7 @@ CXX					= /opt/openmpi/bin/mpicxx -std=c++20
 ifdef DEBUG
 CXXFLAGS			= -O0 -g -DDEBUG
 else
-CXXFLAGS         	= -O3 -march=native -ffast-math -mavx2 -DNDEBUG 
+CXXFLAGS         	= -O3 -ffast-math -DNDEBUG 
 endif
 CXXFLAGS			+= -Wall # -DBLOCKING_MODE -DFF_BOUNDED_BUFFER -DNO_DEFAULT_MAPPING
 
