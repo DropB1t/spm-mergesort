@@ -23,7 +23,7 @@ struct Config {
     std::uint64_t seed = std::chrono::steady_clock::now().time_since_epoch().count();
     std::filesystem::path output_file = INPUT_FILE;
     std::uint32_t payload_max = PAYLOAD_MAX;
-    size_t record_count = g_num_records;
+    size_t record_count = 0;
 
     // Buffer size for efficient large file I/O (512MB buffer)
     static constexpr size_t buffer_size = 512 * 1024 * 1024;

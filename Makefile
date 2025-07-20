@@ -1,6 +1,6 @@
 # Makefile for SPM Mergesort
 
-CXX					= mpicxx -std=c++20
+CXX					= /opt/openmpi/bin/mpicxx -std=c++20
 ifdef DEBUG
 CXXFLAGS			= -O0 -g -DDEBUG
 else

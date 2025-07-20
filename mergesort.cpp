@@ -55,13 +55,11 @@ public:
     }
 
     WorkRange* svc(WorkRange* task) override {
-        // Sort the work range
         auto work_span = task->get_task_span();
         std::sort(std::execution::unseq, work_span.begin(), work_span.end(),
                   [](const RecordTask& a, const RecordTask& b) {
                       return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
                   });
-
         task->ff_id = worker_id;
         return task;
     }
@@ -99,14 +97,14 @@ void k_way_merge_ranges(std::span<RecordTask>& span1, std::span<RecordTask>& spa
 
 class RecordTaskMerger : public ff::ff_node_t<WorkRange> {
 private:
-    int level;
     size_t merger_id;
-    WorkRange* last_task = nullptr;
+    int level;
     bool is_last_level;
-    std::vector<RecordTask>* record_tasks;
+    WorkRange* last_task = nullptr;
+    RecordTask * record_tasks;
     
 public:
-    RecordTaskMerger(int l, bool is_last = false, std::vector<RecordTask>* tasks = nullptr) 
+    RecordTaskMerger(int l, RecordTask *tasks, bool is_last = false) 
         : level(l), is_last_level(is_last), record_tasks(tasks) {}
     
     int svc_init() override {
@@ -119,27 +117,21 @@ public:
             last_task = task;
             return GO_ON; // Wait for pair
         } else {
-            // Merge two tasks
             auto merged_task = merge_work_ranges(last_task, task);
-            
-            // Clean up consumed tasks
-            //delete last_task;
-            //delete task;
+            // Warning: Dispatched WorkRanges from Splitter are referenced Ranges
+            // contained in the original vector meanwhile merged_task are heap-allocated. Possibly memory leak.
             last_task = nullptr;
-
             if (is_last_level) {
                 last_task = merged_task; // Keep the last merged task for final output
                 return GO_ON;
             }
-            
             return merged_task; // Pass to next level
         }
     }
 
     void eosnotify(ssize_t id) override {
         if (!is_last_level && last_task) {
-            // Forward unpaired task to next level
-            this->ff_send_out(last_task);
+            this->ff_send_out(last_task); // Forward unpaired task to next level
         }
     }
 
@@ -163,7 +155,7 @@ private:
 
         auto start_idx = std::min(task1->start_idx, task2->start_idx);
         auto end_idx = std::max(task1->end_idx, task2->end_idx);
-        std::copy(tmp.begin(), tmp.end(), record_tasks->data() + start_idx);
+        std::copy(tmp.begin(), tmp.end(), record_tasks + start_idx);
 
         // Create new WorkRange pointing to merged data
         auto merged_range = new WorkRange{
@@ -211,10 +203,9 @@ private:
 
 public:
     RecordSortingPipeline(std::vector<WorkRange> *work_ranges, 
-                          int num_workers, 
-                          char* mmap_data, 
-                          std::vector<RecordTask>* record_tasks)
+                          int num_workers, RecordTask *record_tasks)
     {
+        assert(record_tasks != nullptr);
         pipeline = std::make_unique<ff_pipeline>();
         work_ranges_storage = work_ranges;
 
@@ -248,7 +239,7 @@ private:
         while (current_level_size > 1) {
             int next_level_size = (current_level_size + 1) / 2;
             levels.push_back(next_level_size);
-            /* std::cout << "[INFO] Level " << level << ": " << next_level_size 
+            /* std::cout << "[DEBUG] Level " << level << ": " << next_level_size 
                       << " mergers (reducing from " << current_level_size << ")" << std::endl; */
             current_level_size = next_level_size;
             level++;
@@ -271,12 +262,12 @@ private:
         return farm;
     }
 
-    ff::ff_farm build_merger_farm(int level, int num_mergers, std::vector<RecordTask>* record_tasks) {
+    ff::ff_farm build_merger_farm(int level, int num_mergers, RecordTask *record_tasks) {
         auto collector = new RecordCollector(level);
         std::vector<ff::ff_node*> mergers;
         
         for (int i = 0; i < num_mergers; i++) {
-            mergers.push_back(new RecordTaskMerger(level, false, record_tasks));
+            mergers.push_back(new RecordTaskMerger(level, record_tasks, false));
         }
 
         auto farm = ff::ff_farm(mergers);
@@ -285,9 +276,9 @@ private:
         return farm;
     }
 
-    ff::ff_farm build_last_merger(int level, std::vector<RecordTask>* record_tasks) {
+    ff::ff_farm build_last_merger(int level, RecordTask *record_tasks) {
         std::vector<ff::ff_node*> mergers;
-        mergers.push_back(new RecordTaskMerger(level, true, record_tasks));
+        mergers.push_back(new RecordTaskMerger(level, record_tasks, true));
         auto farm = ff::ff_farm(mergers);
         return farm;
     }
@@ -303,14 +294,15 @@ private:
 
 public:
 
-    RecordProcessor(char* _mapped_data, size_t file_size, size_t _num_threads = g_th_workers, size_t _chunk_size = max_chunk_size , ExecutionPolicy _policy = g_policy)
+    RecordProcessor(char* _mapped_data, size_t file_size, size_t _num_threads = th_workers, size_t _chunk_size = max_chunk_size , ExecutionPolicy _policy = g_policy)
         : mmap_data(_mapped_data), num_threads(_num_threads), chunk_size(_chunk_size), policy(_policy)
     {
         build_record_index(file_size); // Parse file and build RecordTask index
         std::cout << "[INFO] Found " << this->record_count() << " variable-length records\n";
         std::cout << "[INFO] Chunk size set to " << chunk_size << " numbers of records" << std::endl;
         std::cout << "[INFO] Using " << ep_to_string(policy) << " policy" << std::endl;
-        std::cout << "[INFO] Using " << num_threads << " threads for processing" << std::endl;
+        if( policy != MPI_FF)
+            std::cout << "[INFO] Using " << num_threads << " threads for processing" << std::endl;
     }
 
 private:
@@ -350,7 +342,7 @@ public:
         size_t tasks_per_thread = chunk_tasks / num_threads;
         
         if (tasks_per_thread == 0) {
-            ranges.push_back({chunk_start, chunk_end, &record_tasks});
+            ranges.push_back({chunk_start, chunk_end, record_tasks.data()});
             return ranges;
         }
         
@@ -358,11 +350,18 @@ public:
             size_t range_start = chunk_start + (i * tasks_per_thread);
             size_t range_end = (i == num_threads - 1) ? 
                 chunk_end : chunk_start + ((i + 1) * tasks_per_thread);
-            
-            ranges.push_back({range_start, range_end, &record_tasks});
+
+            ranges.push_back({range_start, range_end, record_tasks.data()});
         }
         
         return ranges;
+    }
+
+    std::span<RecordTask> get_chunk(size_t chunk_start, size_t chunk_end) {
+        if (chunk_start >= record_tasks.size() || chunk_end > record_tasks.size() || chunk_start >= chunk_end) {
+            throw std::out_of_range("Invalid chunk range");
+        }
+        return std::span<RecordTask>(record_tasks.data() + chunk_start, chunk_end - chunk_start);
     }
 
     // Process records chunk by chunk
@@ -387,11 +386,10 @@ public:
     }
 
     // Sequential sort version (sorts whole record_tasks vector)
-    template<typename Compare = std::less<uint64_t>>
-    void seq_sort(Compare comp = Compare{}) {
-        std::stable_sort(record_tasks.begin(), record_tasks.end(), 
-                 [comp](const RecordTask& a, const RecordTask& b) {
-                     return comp(a.key, b.key);
+    void seq_sort() {
+        std::sort(record_tasks.begin(), record_tasks.end(), 
+                 [](const RecordTask& a, const RecordTask& b) {
+                     return std::tie(a.key, a.foffset) < std::tie(b.key, b.foffset);
                  });
     }
 
@@ -475,8 +473,8 @@ public:
             chunk_boundaries.emplace_back(chunk_start, chunk_end);
             
             auto work_ranges = create_work_ranges(chunk_start, chunk_end);
-            RecordSortingPipeline pipeline(&work_ranges, num_threads, mmap_data, &record_tasks);
-            
+            RecordSortingPipeline pipeline(&work_ranges, num_threads, record_tasks.data());
+
             if (pipeline.run_and_wait_end() < 0) {
                 throw std::runtime_error("FastFlow pipeline execution failed!");
             }
@@ -502,7 +500,6 @@ private:
         struct RangeIterator {
             const RecordTask* current;
             const RecordTask* end;
-            //size_t range_id;
             
             bool is_valid() const { return current < end; }
             
@@ -518,13 +515,12 @@ private:
         for (size_t i = 0; i < ranges.size(); ++i) {
             const auto& range = ranges[i];
             if (range.size() > 0) {
-                const RecordTask* start = range.tasks->data() + range.start_idx;
+                const RecordTask* start = range.range_ptr + range.start_idx;
                 pq.emplace(start, start + range.size());
             }
         }
         
         size_t output_idx = 0;
-        
         while (!pq.empty() && output_idx < output.size()) {
             auto min_iter = pq.top();
             pq.pop();
@@ -745,45 +741,432 @@ public:
     size_t size() const { return file_size; }
 };
 
-int main() {
-    try {
-        MMapFile record_file(INPUT_FILE.c_str());
+struct MPI_Buf {
+	char*         data;
+	MPI_Request   req;
+	bool          in_use;
+};
 
-        auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size());
+void MPI_Emitter(int _num_workers) {
+    const size_t num_workers = _num_workers;
+    const size_t chunk_size = max_chunk_size;
+    size_t eos_sent = 0;
+    int error;
+    
+    std::vector<RecordTask> tasks;
+    MMapFile record_file(INPUT_FILE.c_str());
+    auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size(),
+                                                   num_workers, chunk_size, g_policy);
+    size_t num_records = rproc->record_count();
+    t_start_emitter = MPI_Wtime();
+
+    auto send_chunk = [&](MPI_Buf &buf, std::span<RecordTask> &tasks, int rank) {
+		int count = tasks.size();
+
+        std::memcpy(buf.data, tasks.data(), count * record_task_size);
+
+		int error = MPI_Isend(buf.data, count * record_task_size,
+							  MPI_BYTE, rank,
+							  WR_TAG, MPI_COMM_WORLD,
+							  &buf.req);
+		CHECK_ERROR(error);
+		buf.in_use = true;
+	};
+
+    std::vector<std::array<MPI_Buf,2>> bufs(num_workers);
+    for(size_t i = 0; i < num_workers; i++){
+		bufs[i][0].data   = new char[chunk_size * record_task_size];
+		bufs[i][1].data   = new char[chunk_size * record_task_size];
+		bufs[i][0].in_use = bufs[i][1].in_use = false;
+		assert(bufs[i][0].data && bufs[i][1].data);
+    }
+
+    size_t i = 1;
+    size_t first_send_end = 0;
+    std::vector<int> whichbuffer(num_workers,0);
+	for(size_t chunk_start = first_send_end; chunk_start < num_records && i <= num_workers; chunk_start += chunk_size) {
+        size_t chunk_end = std::min(chunk_start + chunk_size, num_records);
+
+        auto vec_span = rproc->get_chunk(chunk_start, chunk_end);
+		send_chunk(bufs[i-1][0], vec_span, i);
+		
+        whichbuffer[i-1] ^= 1;
+        first_send_end += chunk_size;
+        i++;
+    }
+
+    for (size_t chunk_start = first_send_end; chunk_start < num_records; chunk_start += chunk_size) {
+        size_t chunk_end = std::min(chunk_start + chunk_size, num_records);
         
-        auto start = std::chrono::high_resolution_clock::now();
-        if (g_policy == FastFlow) {
-            rproc->ff_chunked_sort();
-        } else {
-            rproc->shm_chunked_sort();
+        auto vec_span = rproc->get_chunk(chunk_start, chunk_end);
+        MPI_Status st;
+        error = MPI_Recv(nullptr,0,MPI_BYTE, MPI_ANY_SOURCE, ACK_TAG,
+						 MPI_COMM_WORLD, &st);
+		CHECK_ERROR(error);
+        int ready_rank = st.MPI_SOURCE;
+
+        int buf_id = whichbuffer[ready_rank-1];
+        auto &buf = bufs[ready_rank-1][buf_id];
+        
+        // if the buffer is still in use, wait for send completion
+        if (buf.in_use) {
+            error = MPI_Wait(&buf.req, MPI_STATUS_IGNORE);
+            CHECK_ERROR(error);
+            buf.in_use = false;
         }
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
-        utils::print_records_to_txt(rproc->get_sorted_tasks(), OUTPUT_FILE);
+        send_chunk(buf, vec_span, ready_rank);
+        whichbuffer[ready_rank-1] ^= 1;
+    }
+
+    while (eos_sent < num_workers) {
+        MPI_Status st;
+        error = MPI_Recv(nullptr,0,MPI_BYTE, MPI_ANY_SOURCE, ACK_TAG,
+						 MPI_COMM_WORLD, &st);
+		CHECK_ERROR(error);
+        int ready_rank = st.MPI_SOURCE;
+        error = MPI_Send(nullptr,0,MPI_BYTE, ready_rank, EOS_TAG, MPI_COMM_WORLD);
+        CHECK_ERROR(error);
+        eos_sent++;
+    }
+
+    for(size_t i = 0; i < num_workers; i++){
+		if (bufs[i][0].in_use) {
+			MPI_Wait(&bufs[i][0].req, MPI_STATUS_IGNORE);
+			delete[] bufs[i][0].data;
+		}
+		if (bufs[i][1].in_use) {
+			MPI_Wait(&bufs[i][1].req, MPI_STATUS_IGNORE);
+			delete[] bufs[i][1].data;
+        }
+    }
+
+}
+
+std::vector<WorkRange> MPI_create_work_ranges(size_t num_threads, size_t chunk_size, RecordTask* data_ptr) {
+    std::vector<WorkRange> ranges;
+    size_t chunk_start = 0;
+    size_t chunk_end = chunk_size;
+    size_t tasks_per_thread = chunk_size / num_threads;
+
+    if (tasks_per_thread == 0) {
+        ranges.push_back({chunk_start, chunk_end, data_ptr});
+        return ranges;
+    }
+    
+    for (size_t i = 0; i < num_threads; ++i) {
+        size_t range_start = chunk_start + (i * tasks_per_thread);
+        size_t range_end = (i == num_threads - 1) ? 
+            chunk_end : chunk_start + ((i + 1) * tasks_per_thread);
+        ranges.push_back({range_start, range_end, data_ptr});
+    }
+    
+    return ranges;
+}
+
+void MPI_Worker(int rank, int collector_rank) {
+    const size_t buff_size = record_task_size * max_chunk_size;
+    const int collector = collector_rank;
+    const int emitter = 0;
+    int error;
+
+    auto send_ready= [emitter]() {
+		MPI_Request req;
+		int error = MPI_Isend(nullptr, 0, MPI_BYTE, emitter, ACK_TAG, MPI_COMM_WORLD, &req);
+		CHECK_ERROR(error);
+		MPI_Request_free(&req);
+	};
+	
+    std::vector<char> recv_buf[2] = {
+		std::vector<char>(buff_size),
+		std::vector<char>(buff_size)
+	};
+    std::vector<char> send_buf[2] = {
+		std::vector<char>(buff_size),
+		std::vector<char>(buff_size)
+	};
+
+    MPI_Request recv_reqs[2];
+    error = MPI_Irecv(recv_buf[0].data(), buff_size, MPI_BYTE,
+					  emitter, WR_TAG, MPI_COMM_WORLD,
+					  &recv_reqs[0]);
+    CHECK_ERROR(error);
+    error = MPI_Irecv(recv_buf[1].data(), buff_size, MPI_BYTE,
+					  emitter, WR_TAG, MPI_COMM_WORLD,
+					  &recv_reqs[1]);
+    CHECK_ERROR(error);
+	
+	MPI_Request send_reqs[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+    int curr = 0;
+    int prev = 1;
+
+    while(true) {
+		int idx;
+		MPI_Status st;
+        error = MPI_Waitany(2, recv_reqs, &idx, &st);
+		CHECK_ERROR(error);
+        if (st.MPI_TAG == EOS_TAG) {
+			int other = 1-idx;
+			MPI_Cancel(&recv_reqs[other]);
+			MPI_Wait(&recv_reqs[other], MPI_STATUS_IGNORE);
+            break;
+        }
+		send_ready();
+
+		int recv_count = 0;
+        MPI_Get_count(&st, MPI_BYTE, &recv_count);
+        size_t tasks_in_batch = recv_count / record_task_size;
+
+		if (send_reqs[curr] != MPI_REQUEST_NULL) {
+			error = MPI_Wait(&send_reqs[curr], MPI_STATUS_IGNORE);
+			CHECK_ERROR(error);
+		}
+        
+        RecordTask* buff_ptr = reinterpret_cast<RecordTask*>(recv_buf[idx].data());
+		auto work_ranges = MPI_create_work_ranges(th_workers, tasks_in_batch, buff_ptr);
+
+        RecordSortingPipeline pipeline(&work_ranges, th_workers, reinterpret_cast<RecordTask*>(send_buf[curr].data()));
+
+        if (pipeline.run_and_wait_end() < 0) {
+            std::cerr << "[ERROR] FastFlow pipeline execution failed!" << std::endl;
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            std::abort();
+        }
+
+		// send results to collector
+		error = MPI_Isend(send_buf[curr].data(), tasks_in_batch*record_task_size,
+						  MPI_BYTE, collector,
+						  COLLECT_TAG, MPI_COMM_WORLD,
+						  &send_reqs[curr]);
+		CHECK_ERROR(error);
+
+		// repost receive
+		error = MPI_Irecv(recv_buf[idx].data(), buff_size, MPI_BYTE,
+                            emitter, MPI_ANY_TAG, MPI_COMM_WORLD,
+                            &recv_reqs[idx]);
+		CHECK_ERROR(error);
+		std::swap(curr,prev);
+    }
+
+    if (send_reqs[0] != MPI_REQUEST_NULL) {
+		error = MPI_Wait(&send_reqs[0], MPI_STATUS_IGNORE);
+		CHECK_ERROR(error);
+	}
+	if (send_reqs[1] != MPI_REQUEST_NULL) {
+		MPI_Wait(&send_reqs[1], MPI_STATUS_IGNORE);
+		CHECK_ERROR(error);
+	}
+
+    // Send EOS to collector
+    error = MPI_Send(nullptr, 0, MPI_BYTE, collector, EOS_TAG, MPI_COMM_WORLD);
+    CHECK_ERROR(error);
+    
+    // Cleanup
+    for (int i = 0; i < 2; ++i) {
+        recv_buf[i].clear();
+        send_buf[i].clear();
+    }
+}
+
+void MPI_k_way_merge_chunks(std::vector<RecordTask>& record_tasks, 
+                            const std::span<RecordTask>& recv_chunk) {
+    if (recv_chunk.size() <= 1) return;
+    
+    std::vector<RecordTask> temp(record_tasks.size() + recv_chunk.size());
+    
+    struct ChunkIterator {
+        const RecordTask* current;
+        const RecordTask* end;
+
+        bool is_valid() const { return current < end; }
+        
+        bool operator>(const ChunkIterator& other) const {
+            if (!is_valid()) return false;
+            if (!other.is_valid()) return true;
+            return std::tie(current->key, current->foffset) > std::tie(other.current->key, other.current->foffset); // Invert for min-heap
+        }
+    };
+    
+    std::priority_queue<ChunkIterator, std::vector<ChunkIterator>, std::greater<ChunkIterator>> pq;
+    
+    // Initialize first two iterators for each chunk
+    const RecordTask* chunk_start = record_tasks.data();
+    const RecordTask* chunk_end = record_tasks.data() + record_tasks.size();
+    pq.emplace(chunk_start, chunk_end);
+    const RecordTask* recv_start = recv_chunk.data();
+    const RecordTask* recv_end = recv_chunk.data() + recv_chunk.size();
+    pq.emplace(recv_start, recv_end);
+    
+    size_t output_idx = 0;
+    
+    while (!pq.empty() && output_idx < temp.size()) {
+        auto min_iter = pq.top();
+        pq.pop();
+        
+        temp[output_idx++] = *min_iter.current;
+        
+        ++min_iter.current;
+        if (min_iter.is_valid()) {
+            pq.emplace(min_iter);
+        }
+    }
+    
+    record_tasks = std::move(temp);
+}
+
+void MPI_Collector(int _num_workers) {
+    const size_t buff_size = record_task_size * max_chunk_size;
+    const size_t num_workers = _num_workers;
+    int error;
+
+    char* buffers[2] = {
+		new char[buff_size],
+		new char[buff_size]
+	};
+	assert(buffers[0] && buffers[1]);
+    MPI_Request requests[2];	
+    error = MPI_Irecv(buffers[0], buff_size, MPI_BYTE,
+					  MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, requests);
+    CHECK_ERROR(error);
+    error = MPI_Irecv(buffers[1], buff_size, MPI_BYTE,
+					  MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, requests+1);
+    CHECK_ERROR(error);
+    
+    MPI_Status st;
+    size_t eos_received = 0;
+    std::vector<RecordTask> collected_tasks;
+    collected_tasks.reserve(max_chunk_size * num_workers);
+    while (true) {
+        int idx;
+        error = MPI_Waitany(2, requests, &idx, &st);
+        CHECK_ERROR(error);
+        
+        if (st.MPI_TAG == EOS_TAG) {
+            eos_received++;
+            if (eos_received == num_workers) {
+                break; // All workers sent EOS
+            }
+            error = MPI_Irecv(buffers[idx], buff_size, MPI_BYTE,
+						  MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, requests+idx);
+            CHECK_ERROR(error);
+            continue;
+        }
+        if (st.MPI_TAG != COLLECT_TAG) {
+            std::cerr << "[ERROR] Unexpected tag received: " << st.MPI_TAG << "\n";
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            std::abort();
+        }
+
+        int recv_count = 0;
+        MPI_Get_count(&st, MPI_BYTE, &recv_count);
+        int tasks_in_batch = recv_count / record_task_size;
+
+        auto span = std::span<RecordTask>(reinterpret_cast<RecordTask*>(buffers[idx]), tasks_in_batch);
+
+        if (!span.empty()) {
+            // Merge the received chunk with collected tasks
+            if (collected_tasks.empty()) {
+                collected_tasks.assign(span.begin(), span.end());
+            } else {
+                MPI_k_way_merge_chunks(collected_tasks, span);
+            }
+        }
+
+        // repost receive
+		error = MPI_Irecv(buffers[idx], buff_size, MPI_BYTE,
+					  MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,
+					  requests+idx);
+		CHECK_ERROR(error);
+    }
+    t_end = MPI_Wtime();
+    std::printf("Total elapsed time %f ms\n", (t_end-t_start)*1000);
+    std::printf("Emitter file reading time %f ms\n", (t_start-t_start_emitter)*1000);
+    std::printf("Processing time %f ms\n", (t_end-t_start_emitter)*1000);
+
+    utils::print_records_to_txt(collected_tasks, OUTPUT_FILE);
+    
+    delete [] buffers[0]; delete [] buffers[1];
+}
+
+int MPI_Init(int argc, char *argv[]) {
+    int provided;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
+    if (provided < MPI_THREAD_MULTIPLE) {
+        std::cerr << "[ERROR] MPI does not support required threading level\n";
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        std::abort();
+    }
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &cluster_size);
+    std::cout << "[INFO] MPI initialized with rank " << rank << " out of " << cluster_size << " processes\n";
+
+    if (cluster_size < 3) {
+        std::cerr << "[ERROR] At least 3 MPI processes are required for this application\n";
+        MPI_Abort(MPI_COMM_WORLD, -1);
+        std::abort();
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD); // needed to measure exec time properly
+	t_start = MPI_Wtime();
+
+    if (rank == 0) {
+        MPI_Emitter(cluster_size-2);
+    } else if (rank < cluster_size - 1) {
+        MPI_Worker(rank, cluster_size-1);
+    } else {
+        MPI_Collector(cluster_size-2);
+    }
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    try {
+        if (g_policy == MPI_FF) {
+            int error = MPI_Init(argc, argv);
+            if ( error != MPI_SUCCESS) {
+                std::cerr << "[ERROR] Failed to initialize MPI\n";
+                return error;
+            }
+            MPI_Finalize();
+            return 0;
+        } else {
+            MMapFile record_file(INPUT_FILE.c_str());
+
+            auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size());
+            
+            auto start = std::chrono::high_resolution_clock::now();
+            if (g_policy == FastFlow) {
+                rproc->ff_chunked_sort();
+            } else {
+                rproc->shm_chunked_sort();
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
+            utils::print_records_to_txt(rproc->get_sorted_tasks(), OUTPUT_FILE);
 
 #if defined(DEBUG)
-        // Verify sorting
-        if (rproc->verify_sorted()) {
-            std::cout << "[DEBUG] Sort verification: PASSED\n";
-        } else {
-            std::cout << "[DEBUG] Sort verification: FAILED\n";
-        }
-        std::atomic<size_t> total_payload_bytes{0};
-        rproc->process_chunked([&total_payload_bytes](WorkRange range) {
-            size_t local_bytes = 0;
-            for (const auto& task : range.get_task_span()) {
-                local_bytes += task.len;
+            // Verify sorting
+            if (rproc->verify_sorted()) {
+                std::cout << "[DEBUG] Sort verification: PASSED\n";
+            } else {
+                std::cout << "[DEBUG] Sort verification: FAILED\n";
             }
-            total_payload_bytes += local_bytes;
-        });
-        std::cout << "[DEBUG] Total payload bytes: " << total_payload_bytes << "\n";
+            std::atomic<size_t> total_payload_bytes{0};
+            rproc->process_chunked([&total_payload_bytes](WorkRange range) {
+                size_t local_bytes = 0;
+                for (const auto& task : range.get_task_span()) {
+                    local_bytes += task.len;
+                }
+                total_payload_bytes += local_bytes;
+            });
+            std::cout << "[DEBUG] Total payload bytes: " << total_payload_bytes << "\n";
 #endif
-        
+        }
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] " << e.what() << "\n";
         return 1;
     }
-    
     return 0;
 }
