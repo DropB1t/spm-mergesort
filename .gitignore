@@ -43,6 +43,9 @@
 # Temporary files
 mergesort
 record_gen
+Rplots.pdf
 *.dat
 *.txt
 *.log
+*.png
+*.csv

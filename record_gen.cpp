@@ -115,7 +115,7 @@ namespace rng {
     }
     
     auto make_key_generator(Generator& gen) -> std::function<std::uint64_t()> {
-        static KeyDist dist{0, 10};
+        static KeyDist dist{0, 50'000'000};
         return [&gen]() { return dist(gen); };
     }
     
@@ -272,7 +272,7 @@ int main(int argc, char* argv[]) {
         }
         
         pipeline::generate_records(*config);
-        utils::print_records_to_txt(config->output_file.string(), "generated.txt");
+        //utils::print_records_to_txt(config->output_file.string(), "generated.txt");
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

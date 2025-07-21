@@ -25,6 +25,7 @@ using namespace ff;
 #include "defines.hpp"
 #include "record.hpp"
 #include "utils.hpp"
+#include "timer.hpp"
 
 class RecordTaskSplitter : public ff_node_t<WorkRange> {
 private:
@@ -447,18 +448,11 @@ public:
         }
         switch (policy) {
             case OMP: {
-                double start = omp_get_wtime();
                 omp_dac_merge_chunks(chunk_boundaries);
-                double elapsed = omp_get_wtime() - start;
-                std::cout << "[TIMES] dac omp chunk merge times " << elapsed*1000.0 << " ms\n";
                 break;
             }
             default: {
-                auto start = std::chrono::high_resolution_clock::now();
                 k_way_merge_chunks(chunk_boundaries);
-                auto end = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-                std::cout << "[TIMES] k way chunk merge times " << duration.count() << " ms\n";
                 break;
             }
         }
@@ -758,7 +752,7 @@ void MPI_Emitter(int _num_workers) {
     auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size(),
                                                    num_workers, chunk_size, g_policy);
     size_t num_records = rproc->record_count();
-    t_start_emitter = MPI_Wtime();
+    t_start = MPI_Wtime();
 
     auto send_chunk = [&](MPI_Buf &buf, std::span<RecordTask> &tasks, int rank) {
 		int count = tasks.size();
@@ -1014,6 +1008,11 @@ void MPI_k_way_merge_chunks(std::vector<RecordTask>& record_tasks,
 }
 
 void MPI_Collector(int _num_workers) {
+    BenchmarkTimer timer(csv_file);
+    timer.setTestParameters(ep_to_string(g_policy), g_num_processes, th_workers, 
+                max_chunk_size, g_record_count);
+    timer.start();
+
     const size_t buff_size = record_task_size * max_chunk_size;
     const size_t num_workers = _num_workers;
     int error;
@@ -1077,12 +1076,15 @@ void MPI_Collector(int _num_workers) {
 					  requests+idx);
 		CHECK_ERROR(error);
     }
-    t_end = MPI_Wtime();
-    std::printf("Total elapsed time %f ms\n", (t_end-t_start)*1000);
-    std::printf("Emitter file reading time %f ms\n", (t_start-t_start_emitter)*1000);
-    std::printf("Processing time %f ms\n", (t_end-t_start_emitter)*1000);
 
-    utils::print_records_to_txt(collected_tasks, OUTPUT_FILE);
+    t_end = MPI_Wtime();
+    t_elapsed = (t_end-t_start)*1000;
+
+    timer.stop();
+    timer.setLastCompletionTimeMs(t_elapsed);
+    timer.writeLastMeasurement();
+    std::cout << "Total elapsed time " << t_elapsed << " ms\n";
+    //utils::print_records_to_txt(collected_tasks, OUTPUT_FILE);
     
     delete [] buffers[0]; delete [] buffers[1];
 }
@@ -1107,8 +1109,8 @@ int MPI_Init(int argc, char *argv[]) {
         std::abort();
     }
 
-    MPI_Barrier(MPI_COMM_WORLD); // needed to measure exec time properly
-	t_start = MPI_Wtime();
+    //MPI_Barrier(MPI_COMM_WORLD); // needed to measure exec time properly
+	//t_start = MPI_Wtime();
 
     if (rank == 0) {
         MPI_Emitter(cluster_size-2);
@@ -1121,6 +1123,22 @@ int MPI_Init(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc != 7) {
+        std::cerr << "Usage: " << argv[0] 
+                  << " <execution_policy> <num_processes> <num_threads> <chunk_size> <record_count> <csv_file>\n";
+        return 1;
+    }
+    
+    std::string execution_policy = argv[1];
+    g_policy = string_to_ep(execution_policy);
+    th_workers = std::stoi(argv[3]);
+    max_chunk_size = std::stoi(argv[4]);
+    
+    g_num_processes = std::stoi(argv[2]); // Only for logging purposes
+    g_record_count = std::stol(argv[5]); // Only for logging purposes
+    
+    csv_file = argv[6];
+
     try {
         if (g_policy == MPI_FF) {
             int error = MPI_Init(argc, argv);
@@ -1131,20 +1149,28 @@ int main(int argc, char *argv[]) {
             MPI_Finalize();
             return 0;
         } else {
-            MMapFile record_file(INPUT_FILE.c_str());
 
+            BenchmarkTimer timer(csv_file);
+            timer.setTestParameters(execution_policy, g_num_processes, th_workers, 
+                       max_chunk_size, g_record_count);
+
+            MMapFile record_file(INPUT_FILE.c_str());
             auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size());
             
-            auto start = std::chrono::high_resolution_clock::now();
+            //auto start = std::chrono::high_resolution_clock::now();
+            timer.start();
             if (g_policy == FastFlow) {
                 rproc->ff_chunked_sort();
             } else {
                 rproc->shm_chunked_sort();
             }
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
-            utils::print_records_to_txt(rproc->get_sorted_tasks(), OUTPUT_FILE);
+            timer.stop();
+            timer.writeLastMeasurement();
+            //auto end = std::chrono::high_resolution_clock::now();
+            //auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+            //std::cout << "[RESULT] Sorted records in " << duration.count() << " ms\n";
+            //utils::print_records_to_txt(rproc->get_sorted_tasks(), OUTPUT_FILE);
 
 #if defined(DEBUG)
             // Verify sorting

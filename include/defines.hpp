@@ -1,8 +1,8 @@
 #if !defined(DEFINES_HPP)
 #define DEFINES_HPP
 
-#include <string>
 #include <mpi.h>
+#include <string>
 #include <iostream>
 #include <cstdint>
 
@@ -16,7 +16,7 @@ enum class ExecutionPolicy {
 
 using enum ExecutionPolicy;
 
-constexpr std::string_view ep_to_string(ExecutionPolicy c) {
+constexpr std::string ep_to_string(ExecutionPolicy c) {
     switch (c) {
         case Sequential:    return "Sequential";
         case Parallel:      return "Parallel";
@@ -25,6 +25,16 @@ constexpr std::string_view ep_to_string(ExecutionPolicy c) {
         case MPI_FF:        return "MPI_FF";
     }
     return "Unknown";
+}
+
+constexpr ExecutionPolicy string_to_ep(std::string_view str) {
+    if (str == "Sequential") return Sequential;
+    if (str == "Parallel")   return Parallel;
+    if (str == "OMP")        return OMP;
+    if (str == "FastFlow")   return FastFlow;
+    if (str == "MPI_FF")     return MPI_FF;
+
+    throw std::invalid_argument("Unknown ExecutionPolicy: " + std::string(str));
 }
 
 #define CHECK_ERROR(err) do {								\
@@ -45,20 +55,24 @@ constexpr std::string_view ep_to_string(ExecutionPolicy c) {
 constexpr std::string INPUT_FILE = "records.dat";
 constexpr std::string OUTPUT_FILE = "sorted.txt";
 
-uint32_t PAYLOAD_MAX = 1024; // Maximum payload size in bytes
-uint32_t PAYLOAD_MIN = 8; // Minimum payload size in bytes
+uint32_t PAYLOAD_MAX = 1024;    // Maximum payload size in bytes
+uint32_t PAYLOAD_MIN = 8;       // Minimum payload size in bytes
 
 /* EXECUTION PARAMETERS */
-ExecutionPolicy g_policy = MPI_FF; // Execution policy
-size_t th_workers = 8; // Number of threads for parallel (shared) processing
-size_t max_chunk_size = 250000; // Maximum chunk size of records
+ExecutionPolicy g_policy;       // Execution policy
+size_t th_workers;              // Number of threads for parallel (shared) processing
+size_t max_chunk_size;          // Maximum chunk size of records
+
+int g_num_processes;
+long g_record_count;
+std::string csv_file;
 
 /* MPI PARAMETERS */
-int cluster_size; // Number of MPI processes in the cluster
+int cluster_size;               // Number of MPI processes in the cluster
 constexpr int WR_TAG = 1;
 constexpr int ACK_TAG = 2;
 constexpr int COLLECT_TAG = 3;
 constexpr int EOS_TAG = 4;
-double t_start, t_start_emitter, t_end;
+double t_start, t_end, t_elapsed;
 
 #endif
