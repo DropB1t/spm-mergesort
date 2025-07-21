@@ -21,7 +21,7 @@ TARGET				= $(SOURCES:.cpp=)
 all: 
 	$(MAKE) $(TARGET)
 
-mergesort: mergesort.cpp include/defines.hpp include/record.hpp include/utils.hpp
+mergesort: mergesort.cpp include/defines.hpp include/record.hpp include/timer.hpp include/utils.hpp
 	$(CXX) $(INCLUDES) $(CXXFLAGS) $< -o mergesort $(LIBS)
 
 record_gen: record_gen.cpp include/defines.hpp include/record.hpp include/utils.hpp
