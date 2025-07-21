@@ -73,6 +73,6 @@ constexpr int WR_TAG = 1;
 constexpr int ACK_TAG = 2;
 constexpr int COLLECT_TAG = 3;
 constexpr int EOS_TAG = 4;
-double t_start, t_end, t_elapsed;
+double t_start, t_start_emitting, t_end, t_elapsed;
 
 #endif

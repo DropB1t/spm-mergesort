@@ -746,6 +746,11 @@ void MPI_Emitter(int _num_workers) {
     const size_t chunk_size = max_chunk_size;
     size_t eos_sent = 0;
     int error;
+
+    BenchmarkTimer timer(csv_file);
+    timer.setTestParameters(ep_to_string(g_policy), g_num_processes, th_workers, 
+                max_chunk_size, g_record_count);
+    timer.start();
     
     std::vector<RecordTask> tasks;
     MMapFile record_file(INPUT_FILE.c_str());
@@ -774,6 +779,7 @@ void MPI_Emitter(int _num_workers) {
 		assert(bufs[i][0].data && bufs[i][1].data);
     }
 
+    t_start_emitting = MPI_Wtime();
     size_t i = 1;
     size_t first_send_end = 0;
     std::vector<int> whichbuffer(num_workers,0);
@@ -842,6 +848,14 @@ void MPI_Emitter(int _num_workers) {
         }
     }
 
+    error = MPI_Recv(nullptr,0,MPI_BYTE, MPI_ANY_SOURCE, EOS_TAG,
+						 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    t_end = MPI_Wtime();
+    t_elapsed = (t_end-t_start)*1000;
+    double t_elapsed_to_emit = (t_start_emitting-t_start)*1000;
+    timer.stop();
+    timer.setLastCompletionTimeMs((t_elapsed-t_elapsed_to_emit));
+    timer.writeLastMeasurement();
 }
 
 std::vector<WorkRange> MPI_create_work_ranges(size_t num_threads, size_t chunk_size, RecordTask* data_ptr) {
@@ -1016,11 +1030,6 @@ void MPI_k_way_merge_chunks(std::vector<RecordTask>& record_tasks,
 }
 
 void MPI_Collector(int _num_workers) {
-    BenchmarkTimer timer(csv_file);
-    timer.setTestParameters(ep_to_string(g_policy), g_num_processes, th_workers, 
-                max_chunk_size, g_record_count);
-    timer.start();
-
     const size_t buff_size = record_task_size * max_chunk_size;
     const size_t num_workers = _num_workers;
     int error;
@@ -1084,16 +1093,11 @@ void MPI_Collector(int _num_workers) {
 					  requests+idx);
 		CHECK_ERROR(error);
     }
-
-    t_end = MPI_Wtime();
-    t_elapsed = (t_end-t_start)*1000;
-
-    timer.stop();
-    timer.setLastCompletionTimeMs(t_elapsed);
-    timer.writeLastMeasurement();
-    std::cout << "Total elapsed time " << t_elapsed << " ms\n";
     //utils::print_records_to_txt(collected_tasks, OUTPUT_FILE);
-    
+
+    error = MPI_Send(nullptr, 0, MPI_BYTE, 0, EOS_TAG, MPI_COMM_WORLD);
+    CHECK_ERROR(error);
+
     delete [] buffers[0]; delete [] buffers[1];
 }
 
