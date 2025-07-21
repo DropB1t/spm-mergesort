@@ -25,9 +25,9 @@ R_SCRIPT="ms_plot_script.r"
 
 # Parameters to iterate over
 EXECUTION_POLICIES=("OMP" "FastFlow" "MPI_FF")
-NUM_PROCESSES=(4 6 8)
+NUM_PROCESSES=(4 6 7)
 NUM_THREADS=(4 8 16)
-CHUNK_SIZES=(500000 1000000 5000000)
+CHUNK_SIZES=(500000 1000000 5000000 10000000)
 RECORD_COUNTS=(1000000 4000000 10000000 50000000) # 500MB 2GB 5GB 25GB
 NUM_RUNS=3  # Number of repetitions for averaging
 
@@ -153,11 +153,12 @@ run_benchmark_job() {
              --nodes="$processes" \
              --ntasks="$processes" \
              --ntasks-per-node="1" \
+             --cpus-per-task="$threads" \
+             --cpu-bind="none" \
              --mpi="pmix" \
              --output="$log_file" \
              --error="${log_file}.err" \
              $cmd
-             #--cpus-per-task="$threads" \
              #--job-name="$job_name" \
     elif [[ "$policy" == "MPI_FF" ]]; then
         echo "Executing: mpirun -n $processes $cmd" > "$log_file"
