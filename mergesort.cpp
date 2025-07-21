@@ -752,7 +752,6 @@ void MPI_Emitter(int _num_workers) {
     auto rproc = std::make_unique<RecordProcessor>(record_file.data(),record_file.size(),
                                                    num_workers, chunk_size, g_policy);
     size_t num_records = rproc->record_count();
-    t_start = MPI_Wtime();
 
     auto send_chunk = [&](MPI_Buf &buf, std::span<RecordTask> &tasks, int rank) {
 		int count = tasks.size();
@@ -1118,8 +1117,8 @@ int MPI_Init(int argc, char *argv[]) {
         std::abort();
     }
 
-    //MPI_Barrier(MPI_COMM_WORLD); // needed to measure exec time properly
-	//t_start = MPI_Wtime();
+    MPI_Barrier(MPI_COMM_WORLD); // needed to measure exec time properly
+	t_start = MPI_Wtime();
 
     if (rank == 0) {
         MPI_Emitter(cluster_size-2);
