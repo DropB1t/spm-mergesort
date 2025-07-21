@@ -113,7 +113,7 @@ public:
              << measurement.num_threads << ","
              << measurement.chunk_size << ","
              << measurement.record_count << ","
-             << std::fixed << std::setprecision(3) << measurement.completion_time_ms << "\n";
+             << measurement.completion_time_ms << "\n";
         
         file.close();
         std::cout << "Measurement written to " << output_file << std::endl;
@@ -136,7 +136,7 @@ public:
                  << measurement.num_threads << ","
                  << measurement.chunk_size << ","
                  << measurement.record_count << ","
-                 << std::fixed << std::setprecision(3) << measurement.completion_time_ms << "\n";
+                 << measurement.completion_time_ms << "\n";
         }
         
         file.close();
@@ -168,8 +168,7 @@ public:
                   << "Threads: " << last.num_threads << "\n"
                   << "Chunk Size: " << last.chunk_size << "\n"
                   << "Record Count: " << last.record_count << "\n"
-                  << "Completion Time: " << std::fixed << std::setprecision(2) 
-                  << last.completion_time_ms << " ms\n"
+                  << "Completion Time: " << last.completion_time_ms << " ms\n"
                   << "================================\n" << std::endl;
     }
     

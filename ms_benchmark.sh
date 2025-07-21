@@ -193,35 +193,30 @@ run_all_benchmarks() {
     # echo "execution_policy,num_processes,num_threads,chunk_size,record_count,completion_time_ms,run_number,timestamp" > "$main_csv"
     
     # Iterate through all parameter combinations
-    for policy in "${EXECUTION_POLICIES[@]}"; do
-        print_info "Processing execution policy: $policy"
-        
-        if [[ "$policy" == "MPI_FF" ]]; then
-            # MPI_FF: iterate over both processes and threads
-            for record_count in "${RECORD_COUNTS[@]}"; do
-                ./record_gen "$record_count"
-                for processes in "${NUM_PROCESSES[@]}"; do
-                    for threads in "${NUM_THREADS[@]}"; do
-                        for chunk_size in "${CHUNK_SIZES[@]}"; do
-                            for run in $(seq 1 $NUM_RUNS); do
-                                current_job=$((current_job + 1))
-                                
-                                if ! run_benchmark_job "$policy" "$processes" "$threads" "$chunk_size" "$record_count" "$run" "$current_job" "$total_jobs"; then
-                                    failed_jobs=$((failed_jobs + 1))
-                                fi
-                                
-                                sleep
+    for record_count in "${RECORD_COUNTS[@]}"; do
+        ./record_gen "$record_count"
+        for policy in "${EXECUTION_POLICIES[@]}"; do
+            print_info "Processing execution policy: $policy"
+            if [[ "$policy" == "MPI_FF" ]]; then
+                # MPI_FF: iterate over both processes and threads
+                    for processes in "${NUM_PROCESSES[@]}"; do
+                        for threads in "${NUM_THREADS[@]}"; do
+                            for chunk_size in "${CHUNK_SIZES[@]}"; do
+                                for run in $(seq 1 $NUM_RUNS); do
+                                    current_job=$((current_job + 1))
+                                    
+                                    if ! run_benchmark_job "$policy" "$processes" "$threads" "$chunk_size" "$record_count" "$run" "$current_job" "$total_jobs"; then
+                                        failed_jobs=$((failed_jobs + 1))
+                                    fi
+                                    
+                                    sleep
+                                done
                             done
                         done
                     done
-                done
-            done
-
-        else
-            # OMP and FastFlow: only iterate over threads (processes = 1)
-            local processes=1
-            for record_count in "${RECORD_COUNTS[@]}"; do
-                ./record_gen "$record_count"
+            else
+                # OMP and FastFlow: only iterate over threads (processes = 1)
+                local processes=1
                 for threads in "${NUM_THREADS[@]}"; do
                     for chunk_size in "${CHUNK_SIZES[@]}"; do
                         for run in $(seq 1 $NUM_RUNS); do
@@ -235,8 +230,8 @@ run_all_benchmarks() {
                         done
                     done
                 done
-            done
-        fi
+            fi
+        done
     done
     
     print_info "Benchmark execution completed!"
