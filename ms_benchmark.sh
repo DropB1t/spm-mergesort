@@ -209,7 +209,7 @@ run_all_benchmarks() {
                                         failed_jobs=$((failed_jobs + 1))
                                     fi
                                     
-                                    sleep
+                                    sleep 1
                                 done
                             done
                         done
