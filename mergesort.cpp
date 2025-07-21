@@ -789,6 +789,15 @@ void MPI_Emitter(int _num_workers) {
         i++;
     }
 
+    if (first_send_end >= num_records) {
+        for (;i <= num_workers; i++){ // 'i' is incremented here
+            std::cout << "Sending EOS to rank " << i << std::endl; 
+            error = MPI_Send(nullptr,0,MPI_BYTE, i, EOS_TAG, MPI_COMM_WORLD);
+            CHECK_ERROR(error);
+            eos_sent++;
+        }
+    }
+
     for (size_t chunk_start = first_send_end; chunk_start < num_records; chunk_start += chunk_size) {
         size_t chunk_end = std::min(chunk_start + chunk_size, num_records);
         
@@ -881,11 +890,11 @@ void MPI_Worker(int rank, int collector_rank) {
 
     MPI_Request recv_reqs[2];
     error = MPI_Irecv(recv_buf[0].data(), buff_size, MPI_BYTE,
-					  emitter, WR_TAG, MPI_COMM_WORLD,
+					  emitter, MPI_ANY_TAG, MPI_COMM_WORLD,
 					  &recv_reqs[0]);
     CHECK_ERROR(error);
     error = MPI_Irecv(recv_buf[1].data(), buff_size, MPI_BYTE,
-					  emitter, WR_TAG, MPI_COMM_WORLD,
+					  emitter, MPI_ANY_TAG, MPI_COMM_WORLD,
 					  &recv_reqs[1]);
     CHECK_ERROR(error);
 	
