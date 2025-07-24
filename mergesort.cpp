@@ -1048,19 +1048,16 @@ void MPI_Collector(int _num_workers) {
     CHECK_ERROR(error);
     
     MPI_Status st;
-    size_t eos_received = 0;
+    size_t eos_count = num_workers;
     std::vector<RecordTask> collected_tasks;
     collected_tasks.reserve(max_chunk_size * num_workers);
-    while (true) {
+    while (eos_count > 0) {
         int idx;
         error = MPI_Waitany(2, requests, &idx, &st);
         CHECK_ERROR(error);
         
         if (st.MPI_TAG == EOS_TAG) {
-            eos_received++;
-            if (eos_received == num_workers) {
-                break; // All workers sent EOS
-            }
+            eos_count--;
             error = MPI_Irecv(buffers[idx], buff_size, MPI_BYTE,
 						  MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, requests+idx);
             CHECK_ERROR(error);
