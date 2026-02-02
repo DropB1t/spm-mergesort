@@ -8,8 +8,6 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <span>
-#include <queue>
 
 #include "defines.hpp"
 #include "record.hpp"
@@ -23,7 +21,7 @@ inline void print_records_to_txt(const std::string& bin_filename, const std::str
     if (!in) throw std::runtime_error("Cannot open input file: " + bin_filename);
     if (!out) throw std::runtime_error("Cannot open output file: " + txt_filename);
 
-    std::cout << "Converting binary records from " << bin_filename 
+    std::cout << "Converting binary records from " << bin_filename
               << " to text format representation inside " << txt_filename << std::endl;
 
     while (true) {
@@ -31,7 +29,7 @@ inline void print_records_to_txt(const std::string& bin_filename, const std::str
             std::cout << "End of file reached, the conversion is complete." << std::endl;
             break;
         }
-        
+
         Record cur;
         in.read(reinterpret_cast<char*>(&cur), sizeof(Record));
         if (in.gcount() != sizeof(Record)) {

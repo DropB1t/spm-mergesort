@@ -3,7 +3,7 @@
 
 #include <mpi.h>
 #include <string>
-#include <iostream>
+#include <stdexcept>
 #include <cstdint>
 
 enum class ExecutionPolicy {
@@ -55,24 +55,24 @@ constexpr ExecutionPolicy string_to_ep(std::string_view str) {
 constexpr std::string INPUT_FILE = "records.dat";
 constexpr std::string OUTPUT_FILE = "sorted.txt";
 
-uint32_t PAYLOAD_MAX = 1024;    // Maximum payload size in bytes
-uint32_t PAYLOAD_MIN = 8;       // Minimum payload size in bytes
+inline uint32_t PAYLOAD_MAX = 1024;    // Maximum payload size in bytes
+inline uint32_t PAYLOAD_MIN = 8;       // Minimum payload size in bytes
 
 /* EXECUTION PARAMETERS */
-ExecutionPolicy g_policy;       // Execution policy
-size_t th_workers;              // Number of threads for parallel (shared) processing
-size_t max_chunk_size;          // Maximum chunk size of records
+inline ExecutionPolicy g_policy;       // Execution policy
+inline size_t th_workers;              // Number of threads for parallel (shared) processing
+inline size_t max_chunk_size;          // Maximum chunk size of records
 
-int g_num_processes;
-long g_record_count;
-std::string csv_file;
+inline int g_num_processes;
+inline long g_record_count;
+inline std::string csv_file;
 
 /* MPI PARAMETERS */
-int cluster_size;               // Number of MPI processes in the cluster
+inline int cluster_size;               // Number of MPI processes in the cluster
 constexpr int WR_TAG = 1;
 constexpr int ACK_TAG = 2;
 constexpr int COLLECT_TAG = 3;
 constexpr int EOS_TAG = 4;
-double t_start, t_start_emitting, t_end, t_elapsed;
+inline double t_start, t_start_emitting, t_end, t_elapsed;
 
 #endif
